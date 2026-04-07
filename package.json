@@ -1,0 +1,38 @@
+{
+  "name": "Apollo",
+  "author": "Yorks0n",
+  "version": "1.0.0",
+  "keywords": ["sunrise"],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Apollo",
+    "uuid": "99dcf2f8-38ee-461a-96b8-3fbf8d8437b9",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery",
+      "flint",
+      "gabbro"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [
+      "LOC_COUNT",
+      "LOC_INDEX",
+      "LOC_NAME",
+      "LOC_LAT",
+      "LOC_LON",
+      "LOC_UTC_OFFSET",
+      "LOC_SYNC_DONE"
+    ],
+    "resources": {
+      "media": []
+    }
+  }
+}
