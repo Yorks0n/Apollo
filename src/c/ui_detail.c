@@ -29,6 +29,11 @@ typedef struct {
   int   right_pad;
   int   name_col_w;
   int   time_col_x;
+  int   header_shift_y;
+  int   row_shift_y;
+  int   name_font_h;
+  int   time_font_h;
+  int   header_font_h;
   GFont name_font;
   GFont time_font;
   GFont header_font;
@@ -38,29 +43,55 @@ static bool s_is_large_rect_display(GRect bounds) {
   return bounds.size.w >= 180 || bounds.size.h >= 200;
 }
 
+static bool s_is_xlarge_rect_display(GRect bounds) {
+  return bounds.size.w >= 200 || bounds.size.h >= 220;
+}
+
+static int s_measure_font_height(GFont font) {
+  GSize size = graphics_text_layout_get_content_size("Ag",
+                                                     font,
+                                                     GRect(0, 0, 200, 60),
+                                                     GTextOverflowModeTrailingEllipsis,
+                                                     GTextAlignmentLeft);
+  return size.h;
+}
+
 static DetailRectLayout s_get_rect_layout(GRect bounds) {
   DetailRectLayout layout;
+  bool xlarge = s_is_xlarge_rect_display(bounds);
   bool large = s_is_large_rect_display(bounds);
-  int time_col_w = large ? 68 : 44;
+  int time_col_w = xlarge ? 80 : (large ? 68 : 44);
 
-  layout.row_h = large ? 22 : 18;
-  layout.header_h = large ? 28 : 22;
-  layout.left_pad = large ? 8 : 4;
-  layout.right_pad = large ? 8 : 4;
+  layout.row_h = xlarge ? 25 : (large ? 22 : 18);
+  layout.header_h = xlarge ? 34 : (large ? 28 : 22);
+  layout.left_pad = xlarge ? 10 : (large ? 8 : 4);
+  layout.right_pad = xlarge ? 10 : (large ? 8 : 4);
   layout.time_col_x = bounds.size.w - layout.right_pad - time_col_w;
-  layout.name_col_w = layout.time_col_x - layout.left_pad - 4;
-  layout.name_font = fonts_get_system_font(large ? FONT_KEY_GOTHIC_18 : FONT_KEY_GOTHIC_14);
-  layout.time_font = fonts_get_system_font(large ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_14_BOLD);
-  layout.header_font = fonts_get_system_font(large ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_14_BOLD);
+  layout.name_col_w = layout.time_col_x - layout.left_pad - (xlarge ? 8 : 4);
+  layout.name_font = fonts_get_system_font(xlarge ? FONT_KEY_GOTHIC_18_BOLD
+                                                  : (large ? FONT_KEY_GOTHIC_18
+                                                           : FONT_KEY_GOTHIC_14));
+  layout.time_font = fonts_get_system_font(xlarge ? FONT_KEY_GOTHIC_24_BOLD
+                                                  : (large ? FONT_KEY_GOTHIC_18_BOLD
+                                                           : FONT_KEY_GOTHIC_14_BOLD));
+  layout.header_font = fonts_get_system_font(xlarge ? FONT_KEY_GOTHIC_24_BOLD
+                                                    : (large ? FONT_KEY_GOTHIC_18_BOLD
+                                                             : FONT_KEY_GOTHIC_14_BOLD));
+  layout.name_font_h = s_measure_font_height(layout.name_font);
+  layout.time_font_h = s_measure_font_height(layout.time_font);
+  layout.header_font_h = s_measure_font_height(layout.header_font);
+  layout.header_shift_y = xlarge ? -4 : 0;
+  layout.row_shift_y = xlarge ? -2 : 0;
   return layout;
 }
 
 static void s_draw_event_row(GContext *ctx, int y, int w,
                              const SolarEvent *event, SolarEventType type,
                              const DetailRectLayout *layout) {
-
   const char *name = solar_event_name(type);
   char time_buf[16];
+  int name_y = y + (layout->row_h - layout->name_font_h) / 2 + layout->row_shift_y;
+  int time_y = y + (layout->row_h - layout->time_font_h) / 2 + layout->row_shift_y;
 
   if (event->status == SOLAR_STATUS_OK) {
     int32_t m = event->local_minutes;
@@ -77,11 +108,13 @@ static void s_draw_event_row(GContext *ctx, int y, int w,
   }
 
   graphics_draw_text(ctx, name, layout->name_font,
-                     GRect(layout->left_pad, y, layout->name_col_w, layout->row_h),
+                     GRect(layout->left_pad, name_y, layout->name_col_w, layout->name_font_h),
                      GTextOverflowModeTrailingEllipsis,
                      GTextAlignmentLeft, NULL);
   graphics_draw_text(ctx, time_buf, layout->time_font,
-                     GRect(layout->time_col_x, y, w - layout->time_col_x - layout->right_pad, layout->row_h),
+                     GRect(layout->time_col_x, time_y,
+                           w - layout->time_col_x - layout->right_pad,
+                           layout->time_font_h),
                      GTextOverflowModeTrailingEllipsis,
                      GTextAlignmentRight, NULL);
 }
@@ -92,9 +125,12 @@ static void s_draw_section(GContext *ctx, int y_start, int w,
                            const SolarDayResult *result,
                            const char *header,
                            const DetailRectLayout *layout) {
-  // Header with separator line
+  int header_y = y_start + (layout->header_h - layout->header_font_h) / 2 + layout->header_shift_y;
+
   graphics_draw_text(ctx, header, layout->header_font,
-                     GRect(layout->left_pad, y_start, w - layout->left_pad - layout->right_pad, layout->header_h),
+                     GRect(layout->left_pad, header_y,
+                           w - layout->left_pad - layout->right_pad,
+                           layout->header_font_h),
                      GTextOverflowModeTrailingEllipsis,
                      GTextAlignmentLeft, NULL);
 
@@ -128,6 +164,9 @@ static void prv_content_update(Layer *layer, GContext *ctx) {
   DetailRectLayout layout = s_get_rect_layout(b);
   int content_h = layout.header_h + layout.row_h * SOLAR_EVENT_COUNT;
   int y_start = s_is_large_rect_display(b) ? (b.size.h - content_h) / 2 : 0;
+  if (s_is_xlarge_rect_display(b)) {
+    y_start -= 8;
+  }
   if (y_start < 0) {
     y_start = 0;
   }
@@ -187,6 +226,8 @@ static void prv_up_click(ClickRecognizerRef r, void *ctx) {
   if (s_page > 0) {
     s_page--;
     prv_round_refresh();
+  } else {
+    window_stack_pop(true);
   }
 #else
   if (s_page > 0) {
