@@ -81,7 +81,7 @@ static DetailRectLayout s_get_rect_layout(GRect bounds) {
   layout.time_font_h = s_measure_font_height(layout.time_font);
   layout.header_font_h = s_measure_font_height(layout.header_font);
   layout.header_shift_y = xlarge ? -4 : 0;
-  layout.row_shift_y = xlarge ? -2 : 0;
+  layout.row_shift_y = xlarge ? -2 : (large ? 0 : -2);
   return layout;
 }
 
@@ -280,6 +280,8 @@ static void prv_window_load(Window *window) {
   int header_gap = large_round ? 10 : 8;
   int w = bounds.size.w;
   int eff_w = w - 2 * inset;
+  int row_right = large_round ? ((w * 2) / 3 + 10) : ((w * 4) / 5 - 10);
+  int row_w = row_right - inset;
   int content_h = header_h + header_gap + row_h * SOLAR_EVENT_COUNT;
   int y = (bounds.size.h - content_h) / 2;
   if (y < (large_round ? 18 : 12)) {
@@ -296,11 +298,11 @@ static void prv_window_load(Window *window) {
   y += header_h + header_gap;
 
   for (int i = 0; i < SOLAR_EVENT_COUNT; i++) {
-    s_round_rows[i] = text_layer_create(GRect(inset, y + i * row_h, eff_w, row_h));
+    s_round_rows[i] = text_layer_create(GRect(inset, y + i * row_h, row_w, row_h));
     text_layer_set_font(s_round_rows[i],
                         fonts_get_system_font(large_round ? FONT_KEY_GOTHIC_18
                                                           : FONT_KEY_GOTHIC_14));
-    text_layer_set_text_alignment(s_round_rows[i], GTextAlignmentCenter);
+    text_layer_set_text_alignment(s_round_rows[i], GTextAlignmentRight);
     text_layer_set_overflow_mode(s_round_rows[i], GTextOverflowModeTrailingEllipsis);
     text_layer_set_background_color(s_round_rows[i], GColorClear);
     layer_add_child(root, text_layer_get_layer(s_round_rows[i]));
