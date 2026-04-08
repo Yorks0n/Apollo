@@ -1,6 +1,7 @@
 #include "ui_main.h"
 #include "solar.h"
 #include "storage.h"
+#include <string.h>
 
 #define RING_PI 3.14159265f
 
@@ -51,6 +52,11 @@ static char s_buf_status[32];
 static char s_buf_event_name[32];
 static char s_buf_event_time[16];
 static char s_buf_countdown[24];
+static int  s_countdown_x;
+static int  s_countdown_y;
+static int  s_countdown_w;
+static int  s_countdown_h_single;
+static int  s_countdown_h_multi;
 
 static int s_scale_from_width(int width, int numerator, int denominator) {
   return (width * numerator + denominator / 2) / denominator;
@@ -152,11 +158,21 @@ static void s_format_event_line(const char *label,
   s_format_time_minutes(local_minutes, time_buf, sizeof(time_buf));
 
   if (is_tomorrow) {
-    snprintf(buf, len, "Tomorrow %s %s", label, time_buf);
+    snprintf(buf, len, "Tomorrow %s\n%s", label, time_buf);
     return;
   }
 
   snprintf(buf, len, "%s %s", label, time_buf);
+}
+
+static void s_set_countdown_text(const char *text) {
+  bool multiline = strchr(text, '\n') != NULL;
+  layer_set_frame(text_layer_get_layer(s_tl_countdown),
+                  GRect(s_countdown_x,
+                        s_countdown_y,
+                        s_countdown_w,
+                        multiline ? s_countdown_h_multi : s_countdown_h_single));
+  text_layer_set_text(s_tl_countdown, text);
 }
 
 static NextEvent s_find_next_event(const SolarDayResult *today,
@@ -793,7 +809,7 @@ static void s_do_update(const SolarDayResult *today,
 
   text_layer_set_text(s_tl_event_time, s_buf_event_time);
   text_layer_set_text(s_tl_event_name, s_buf_event_name);
-  text_layer_set_text(s_tl_countdown, s_buf_countdown);
+  s_set_countdown_text(s_buf_countdown);
 
 #ifdef PBL_COLOR
   window_set_background_color(s_window, GColorBlack);
@@ -871,6 +887,10 @@ static void prv_window_load(Window *window) {
   countdown_font_key = large_rect ? FONT_KEY_GOTHIC_18 : FONT_KEY_GOTHIC_14;
 #endif
   int eff_w = w - inset * 2;
+  int countdown_h_multi = s_scale_from_width(w, 20, 100);
+  if (countdown_h_multi < countdown_h) {
+    countdown_h_multi = countdown_h;
+  }
 
 #ifdef PBL_COLOR
   window_set_background_color(window, GColorBlack);
@@ -907,9 +927,16 @@ static void prv_window_load(Window *window) {
   text_layer_set_background_color(s_tl_event_name, GColorClear);
   layer_add_child(root, text_layer_get_layer(s_tl_event_name));
 
+  s_countdown_x = inset;
+  s_countdown_y = countdown_y;
+  s_countdown_w = eff_w;
+  s_countdown_h_single = countdown_h;
+  s_countdown_h_multi = countdown_h_multi;
+
   s_tl_countdown = text_layer_create(GRect(inset, countdown_y, eff_w, countdown_h));
   text_layer_set_font(s_tl_countdown, fonts_get_system_font(countdown_font_key));
   text_layer_set_text_alignment(s_tl_countdown, GTextAlignmentCenter);
+  text_layer_set_overflow_mode(s_tl_countdown, GTextOverflowModeWordWrap);
   text_layer_set_background_color(s_tl_countdown, GColorClear);
   layer_add_child(root, text_layer_get_layer(s_tl_countdown));
 
@@ -917,7 +944,7 @@ static void prv_window_load(Window *window) {
   text_layer_set_text(s_tl_status, "---");
   text_layer_set_text(s_tl_event_time, "--");
   text_layer_set_text(s_tl_event_name, "---");
-  text_layer_set_text(s_tl_countdown, "");
+  s_set_countdown_text("");
 }
 
 static void prv_window_unload(Window *window) {
