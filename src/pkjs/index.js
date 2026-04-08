@@ -1,131 +1,181 @@
 /* Apollo — PebbleKit JS
  *
- * Responsibilities:
- *  1. On 'ready': send default/stored locations to the watch.
- *  2. On 'showConfiguration': open the config page.
- *  3. On 'webviewclosed': parse saved locations and sync to the watch.
+ * Uses Clay (@rebble/clay) to render a declarative configuration page and
+ * enhances it with search, geolocation, timezone lookup, and validation.
+ *
+ * Location model: { name, lat, lon, baseOffset (min), dst (bool) }
+ * Effective UTC offset sent to watch = baseOffset + (dst ? 60 : 0)
  */
 
-var MESSAGE_KEY = {
-  LOC_COUNT:      0,
-  LOC_INDEX:      1,
-  LOC_NAME:       2,
-  LOC_LAT:        3,
-  LOC_LON:        4,
-  LOC_UTC_OFFSET: 5,
-  LOC_SYNC_DONE:  6
-};
+var Clay = require('@rebble/clay');
+var clayConfig = require('./config');
+var customFn = require('./customFn');
+var MESSAGE_KEY = require('message_keys');
 
-// ---------------------------------------------------------------------------
-// Default locations (used when no config has been saved yet)
-// ---------------------------------------------------------------------------
-var DEFAULT_LOCATIONS = [
-  { name: 'London',   lat:  51.5074,  lon:  -0.1278, utcOffset:    0 },
-  { name: 'New York', lat:  40.7128,  lon: -74.0060, utcOffset: -300 },
-  { name: 'Tokyo',    lat:  35.6762,  lon: 139.6503, utcOffset:  540 },
-  { name: 'Sydney',   lat: -33.8688,  lon: 151.2093, utcOffset:  600 }
-];
+var clay = new Clay(clayConfig, customFn, { autoHandleEvents: false });
 
-// ---------------------------------------------------------------------------
-// Storage helpers
-// ---------------------------------------------------------------------------
+var MAX_LOCATIONS = clayConfig.MAX_LOCATIONS || 8;
+
+function normalizeWhitespace(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function toEnglishName(text, fallback) {
+  var normalized = normalizeWhitespace(text);
+  if (!normalized) {
+    return fallback || '';
+  }
+
+  if (!/^[\x20-\x7E]+$/.test(normalized)) {
+    normalized = normalizeWhitespace(normalized.replace(/[^\x20-\x7E]/g, ''));
+  }
+
+  if (!normalized) {
+    return fallback || '';
+  }
+
+  return normalized.substring(0, 23);
+}
+
+function normalizeLocation(loc) {
+  return {
+    name: toEnglishName(loc.name, 'Location'),
+    lat: typeof loc.lat === 'number' ? loc.lat : parseFloat(loc.lat || 0),
+    lon: typeof loc.lon === 'number' ? loc.lon : parseFloat(loc.lon || 0),
+    baseOffset: loc.baseOffset !== undefined ?
+      (parseInt(loc.baseOffset, 10) || 0) :
+      (parseInt(loc.utcOffset, 10) || 0),
+    dst: !!loc.dst
+  };
+}
+
+function normalizeLocations(rawLocations) {
+  if (!Array.isArray(rawLocations)) {
+    return [];
+  }
+
+  return rawLocations.slice(0, MAX_LOCATIONS).map(normalizeLocation);
+}
+
 function loadLocations() {
   try {
     var raw = localStorage.getItem('apollo_locations');
     if (raw) {
-      var locs = JSON.parse(raw);
-      if (Array.isArray(locs) && locs.length > 0) return locs;
+      var parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return normalizeLocations(parsed);
+      }
     }
-  } catch (e) { /* ignore */ }
-  return DEFAULT_LOCATIONS;
+  } catch (e) {}
+
+  return normalizeLocations(JSON.parse(clayConfig.DEFAULT_LOCATIONS_JSON));
 }
 
-function saveLocations(locs) {
+function saveLocations(locations) {
   try {
-    localStorage.setItem('apollo_locations', JSON.stringify(locs));
-  } catch (e) { /* ignore */ }
+    localStorage.setItem('apollo_locations', JSON.stringify(locations));
+  } catch (e) {}
 }
 
-// ---------------------------------------------------------------------------
-// Send locations to the watch
-// ---------------------------------------------------------------------------
-function sendLocations(locations, successFn, failFn) {
-  var locs = locations.slice(0, 12); // max 12
+function sendLocations(locations, doneFn) {
+  var locs = normalizeLocations(locations);
 
   function sendOne(index) {
     if (index >= locs.length) {
-      // All sent: send LOC_SYNC_DONE
-      Pebble.sendAppMessage(
-        { [MESSAGE_KEY.LOC_SYNC_DONE]: 1 },
-        function() { if (successFn) successFn(); },
-        function(e) { console.log('SYNC_DONE failed: ' + e.error); if (failFn) failFn(e); }
+      var doneMessage = {};
+      doneMessage[MESSAGE_KEY.LOC_SYNC_DONE] = 1;
+      Pebble.sendAppMessage(doneMessage,
+        function() {
+          if (doneFn) {
+            doneFn();
+          }
+        },
+        function(error) {
+          console.log('LOC_SYNC_DONE failed: ' + error.error);
+        }
       );
       return;
     }
 
     var loc = locs[index];
-    var msg = {};
-    msg[MESSAGE_KEY.LOC_INDEX]      = index;
-    msg[MESSAGE_KEY.LOC_NAME]       = (loc.name || 'Location').substring(0, 23);
-    msg[MESSAGE_KEY.LOC_LAT]        = Math.round((loc.lat  || 0) * 1000000);
-    msg[MESSAGE_KEY.LOC_LON]        = Math.round((loc.lon  || 0) * 1000000);
-    msg[MESSAGE_KEY.LOC_UTC_OFFSET] = Math.round(loc.utcOffset || 0);
+    var message = {};
+    message[MESSAGE_KEY.LOC_INDEX] = index;
+    message[MESSAGE_KEY.LOC_NAME] = loc.name.substring(0, 23) || 'Location';
+    message[MESSAGE_KEY.LOC_LAT] = Math.round(loc.lat * 1000000);
+    message[MESSAGE_KEY.LOC_LON] = Math.round(loc.lon * 1000000);
+    message[MESSAGE_KEY.LOC_UTC_OFFSET] = (loc.baseOffset || 0) + (loc.dst ? 60 : 0);
 
-    Pebble.sendAppMessage(msg,
-      function() { sendOne(index + 1); },
-      function(e) {
-        console.log('Failed to send location ' + index + ': ' + e.error);
-        // Retry once
-        Pebble.sendAppMessage(msg,
-          function() { sendOne(index + 1); },
-          function(e2) {
-            console.log('Retry also failed: ' + e2.error);
-            sendOne(index + 1); // skip and continue
+    Pebble.sendAppMessage(message,
+      function() {
+        sendOne(index + 1);
+      },
+      function(error) {
+        console.log('Location ' + index + ' send failed, retrying: ' + error.error);
+        Pebble.sendAppMessage(message,
+          function() {
+            sendOne(index + 1);
+          },
+          function() {
+            sendOne(index + 1);
           }
         );
       }
     );
   }
 
-  // Send count first
-  var countMsg = {};
-  countMsg[MESSAGE_KEY.LOC_COUNT] = locs.length;
-  Pebble.sendAppMessage(countMsg,
-    function() { sendOne(0); },
-    function(e) { console.log('LOC_COUNT failed: ' + e.error); if (failFn) failFn(e); }
+  var countMessage = {};
+  countMessage[MESSAGE_KEY.LOC_COUNT] = locs.length;
+  Pebble.sendAppMessage(countMessage,
+    function() {
+      sendOne(0);
+    },
+    function(error) {
+      console.log('LOC_COUNT failed: ' + error.error);
+    }
   );
 }
 
-// ---------------------------------------------------------------------------
-// Event listeners
-// ---------------------------------------------------------------------------
 Pebble.addEventListener('ready', function() {
   console.log('Apollo JS ready');
-  var locs = loadLocations();
-  sendLocations(locs);
+  sendLocations(loadLocations());
 });
 
 Pebble.addEventListener('showConfiguration', function() {
-  var locs = loadLocations();
-  // Encode current locations into the URL so the config page can pre-populate
-  var encoded = encodeURIComponent(JSON.stringify(locs));
-  var url = 'https://yorkson.github.io/apollo-config/?data=' + encoded;
-  console.log('Opening config: ' + url);
-  Pebble.openURL(url);
+  Pebble.openURL(clay.generateUrl());
 });
 
-Pebble.addEventListener('webviewclosed', function(e) {
-  if (!e.response || e.response === 'CANCELLED') return;
+Pebble.addEventListener('webviewclosed', function(event) {
+  if (!event.response || event.response === 'CANCELLED') {
+    return;
+  }
 
   try {
-    var locs = JSON.parse(decodeURIComponent(e.response));
-    if (Array.isArray(locs) && locs.length > 0) {
-      saveLocations(locs);
-      sendLocations(locs, function() {
-        console.log('Locations synced after config');
+    var settings = clay.getSettings(event.response, false);
+    var rawLocations = settings.LOCATIONS_JSON;
+    if (rawLocations && typeof rawLocations === 'object' &&
+        rawLocations.value !== undefined) {
+      rawLocations = rawLocations.value;
+    }
+
+    var locations = normalizeLocations(JSON.parse(rawLocations || '[]'));
+    if (locations.length > 0) {
+      saveLocations(locations);
+      sendLocations(locations, function() {
+        console.log('Synced ' + locations.length + ' locations');
       });
     }
-  } catch (err) {
-    console.log('webviewclosed parse error: ' + err);
+  } catch (error) {
+    console.log('webviewclosed error: ' + error);
   }
+});
+
+Pebble.addEventListener('appmessage', function(event) {
+  if (!event.payload || !event.payload[MESSAGE_KEY.SYNC_REQUEST]) {
+    return;
+  }
+
+  console.log('Received sync request from watch');
+  sendLocations(loadLocations(), function() {
+    console.log('Synced locations after watch request');
+  });
 });

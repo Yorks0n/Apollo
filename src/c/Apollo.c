@@ -5,6 +5,10 @@
 #include "ui_locations.h"
 #include "ui_detail.h"
 
+#ifndef MESSAGE_KEY_SYNC_REQUEST
+#define MESSAGE_KEY_SYNC_REQUEST 10008
+#endif
+
 // -------------------------------------------------------------------------
 // Global state
 // -------------------------------------------------------------------------
@@ -16,6 +20,21 @@ static int            s_prev_local_day = -1;
 // AppMessage sync state
 static int s_sync_expected = 0;
 static uint8_t s_sync_selected = 0;
+
+static void prv_request_phone_sync(void) {
+  DictionaryIterator *iter = NULL;
+  AppMessageResult result = app_message_outbox_begin(&iter);
+  if (result != APP_MSG_OK || !iter) {
+    APP_LOG(APP_LOG_LEVEL_WARNING, "Sync request begin failed: %d", (int)result);
+    return;
+  }
+
+  dict_write_uint8(iter, MESSAGE_KEY_SYNC_REQUEST, 1);
+  result = app_message_outbox_send();
+  if (result != APP_MSG_OK) {
+    APP_LOG(APP_LOG_LEVEL_WARNING, "Sync request send failed: %d", (int)result);
+  }
+}
 
 // -------------------------------------------------------------------------
 // Calculation
@@ -162,6 +181,7 @@ static void prv_init(void) {
   app_message_register_inbox_received(prv_inbox_received);
   app_message_register_inbox_dropped(prv_inbox_dropped);
   app_message_open(256, 64);
+  prv_request_phone_sync();
 
   tick_timer_service_subscribe(MINUTE_UNIT, prv_tick_handler);
 

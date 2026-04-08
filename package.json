@@ -2,9 +2,13 @@
   "name": "Apollo",
   "author": "Yorks0n",
   "version": "1.0.0",
-  "keywords": ["sunrise"],
+  "keywords": [
+    "sunrise"
+  ],
   "private": true,
-  "dependencies": {},
+  "dependencies": {
+    "@rebble/clay": "^1.0.8"
+  },
   "pebble": {
     "displayName": "Apollo",
     "uuid": "99dcf2f8-38ee-461a-96b8-3fbf8d8437b9",
@@ -22,6 +26,9 @@
     "watchapp": {
       "watchface": false
     },
+    "capabilities": [
+      "configurable"
+    ],
     "messageKeys": [
       "LOC_COUNT",
       "LOC_INDEX",
@@ -29,7 +36,9 @@
       "LOC_LAT",
       "LOC_LON",
       "LOC_UTC_OFFSET",
-      "LOC_SYNC_DONE"
+      "LOC_SYNC_DONE",
+      "LOCATIONS_JSON",
+      "SYNC_REQUEST"
     ],
     "resources": {
       "media": []
