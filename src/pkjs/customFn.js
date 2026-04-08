@@ -9,7 +9,6 @@ module.exports = function(minified) {
   var searchResultsItem;
   var saveStatusItem;
   var searchButtonItem;
-  var currentLocationButtonItem;
   var saveButtonItem;
   var rootFormEl;
   var searchSectionEl;
@@ -248,13 +247,11 @@ module.exports = function(minified) {
     if (disabled) {
       searchQueryItem.disable();
       searchButtonItem.disable();
-      currentLocationButtonItem.disable();
       return;
     }
 
     searchQueryItem.enable();
     searchButtonItem.enable();
-    currentLocationButtonItem.enable();
   }
 
   function toggleSlotFields(slot, enabled) {
@@ -570,31 +567,6 @@ module.exports = function(minified) {
     xhr.send();
   }
 
-  function fillCurrentLocation() {
-    if (!navigator.geolocation) {
-      setStatus(searchStatusItem, 'error', 'This environment does not support geolocation.');
-      return;
-    }
-
-    var slot = getSlot(editSlotItem.get());
-    setStatus(searchStatusItem, 'info', 'Reading current location...');
-
-    navigator.geolocation.getCurrentPosition(function(position) {
-      fillSlot(slot, {
-        name: toEnglishName(slot.name.get(), fallbackLocationName(slot.index)),
-        lat: position.coords.latitude,
-        lon: position.coords.longitude,
-        baseOffset: parseInt(slot.tz.get(), 10) || 0,
-        dst: !!slot.dst.get()
-      });
-      updateLayout();
-      clearMessages();
-      lookupTimezoneForSlot(slot, slot.title);
-    }, function() {
-      setStatus(searchStatusItem, 'error', 'Current location could not be read.');
-    });
-  }
-
   function collectLocations() {
     var locations = [];
     var errors = [];
@@ -701,7 +673,6 @@ module.exports = function(minified) {
     saveStatusItem = clay.getItemById('save-status');
 
     searchButtonItem = clay.getItemById('search-button');
-    currentLocationButtonItem = clay.getItemById('current-location-button');
     saveButtonItem = clay.getItemById('save-button');
     rootFormEl = document.getElementById('main-form');
     searchSectionEl = getSectionElement(editSlotItem);
@@ -772,7 +743,6 @@ module.exports = function(minified) {
     }
 
     searchButtonItem.on('click', performSearch);
-    currentLocationButtonItem.on('click', fillCurrentLocation);
     saveButtonItem.on('click', saveLocations);
 
     searchQueryItem.$manipulatorTarget[0].addEventListener('keydown', function(event) {

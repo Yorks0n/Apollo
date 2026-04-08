@@ -524,6 +524,62 @@ static void s_draw_ring_segment(GContext *ctx,
   s_draw_ring_range(ctx, metrics, 0, end_min, color, width);
 }
 
+#ifndef PBL_COLOR
+static void s_fill_ring_range_bw(GContext *ctx,
+                                 const RingMetrics *metrics,
+                                 int32_t start_min,
+                                 int32_t end_min,
+                                 GColor color,
+                                 int width) {
+  int32_t duration = end_min - start_min;
+  int steps;
+  int radius;
+
+  if (duration <= 0) {
+    return;
+  }
+
+  radius = width / 2;
+  if (radius < 1) {
+    radius = 1;
+  }
+
+  steps = (duration * 720) / MINUTES_PER_DAY;
+  if (steps < 6) {
+    steps = 6;
+  }
+
+  graphics_context_set_fill_color(ctx, color);
+  for (int i = 0; i <= steps; i++) {
+    int32_t minute = start_min + (duration * i) / steps;
+    GPoint point = s_point_on_ring(metrics, (float)minute / (float)MINUTES_PER_DAY);
+    graphics_fill_circle(ctx, point, radius);
+  }
+}
+
+static void s_fill_ring_segment_bw(GContext *ctx,
+                                   const RingMetrics *metrics,
+                                   int32_t start_min,
+                                   int32_t end_min,
+                                   GColor color,
+                                   int width) {
+  start_min = s_normalize_minutes(start_min);
+  end_min = s_normalize_minutes(end_min);
+
+  if (start_min == end_min) {
+    return;
+  }
+
+  if (start_min < end_min) {
+    s_fill_ring_range_bw(ctx, metrics, start_min, end_min, color, width);
+    return;
+  }
+
+  s_fill_ring_range_bw(ctx, metrics, start_min, MINUTES_PER_DAY, color, width);
+  s_fill_ring_range_bw(ctx, metrics, 0, end_min, color, width);
+}
+#endif
+
 static void s_ring_update_proc(Layer *layer, GContext *ctx) {
   if (!s_has_data) {
     return;
@@ -583,20 +639,20 @@ static void s_ring_update_proc(Layer *layer, GContext *ctx) {
 
     if (s_event_ok(&s_cached_today.events[SOLAR_EVENT_GOLDEN_MORNING]) &&
         s_event_ok(&s_cached_today.golden_morning_end)) {
-      s_draw_ring_segment(ctx, &metrics,
-                          s_cached_today.events[SOLAR_EVENT_GOLDEN_MORNING].local_minutes,
-                          s_cached_today.golden_morning_end.local_minutes,
-                          GColorBlack,
-                          metrics.golden_stroke_width);
+      s_fill_ring_segment_bw(ctx, &metrics,
+                             s_cached_today.events[SOLAR_EVENT_GOLDEN_MORNING].local_minutes,
+                             s_cached_today.golden_morning_end.local_minutes,
+                             GColorDarkGray,
+                             metrics.golden_stroke_width);
     }
 
     if (s_event_ok(&s_cached_today.events[SOLAR_EVENT_GOLDEN_EVENING]) &&
         s_event_ok(&s_cached_today.events[SOLAR_EVENT_DUSK_GLOW])) {
-      s_draw_ring_segment(ctx, &metrics,
-                          s_cached_today.events[SOLAR_EVENT_GOLDEN_EVENING].local_minutes,
-                          s_cached_today.events[SOLAR_EVENT_DUSK_GLOW].local_minutes,
-                          GColorBlack,
-                          metrics.golden_stroke_width);
+      s_fill_ring_segment_bw(ctx, &metrics,
+                             s_cached_today.events[SOLAR_EVENT_GOLDEN_EVENING].local_minutes,
+                             s_cached_today.events[SOLAR_EVENT_DUSK_GLOW].local_minutes,
+                             GColorDarkGray,
+                             metrics.golden_stroke_width);
     }
   }
 #endif
@@ -612,8 +668,11 @@ static void s_ring_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, APOLLO_SUN_COLOR);
   graphics_fill_circle(ctx, marker, marker_radius);
 #else
-  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_context_set_fill_color(ctx, GColorWhite);
   graphics_fill_circle(ctx, marker, marker_radius);
+  graphics_context_set_stroke_color(ctx, GColorBlack);
+  graphics_context_set_stroke_width(ctx, 2);
+  graphics_draw_circle(ctx, marker, marker_radius);
 #endif
 }
 

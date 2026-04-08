@@ -143,11 +143,11 @@ var config = [
     items: [
       {
         type: 'heading',
-        defaultValue: 'Search and quick fill'
+        defaultValue: 'Search and fill'
       },
       {
         type: 'text',
-        defaultValue: 'Search for a new place or use your current position. Results fill the next available slot automatically, and you can still edit the values manually before saving.'
+        defaultValue: 'Search for a new place. Results fill the next available slot automatically, and you can still edit the values manually before saving.'
       },
       {
         type: 'select',
@@ -170,11 +170,6 @@ var config = [
         id: 'search-button',
         primary: true,
         defaultValue: 'Search places'
-      },
-      {
-        type: 'button',
-        id: 'current-location-button',
-        defaultValue: 'Use current location'
       },
       {
         type: 'text',
