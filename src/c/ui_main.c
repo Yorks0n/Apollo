@@ -52,6 +52,16 @@ static char s_buf_event_name[32];
 static char s_buf_event_time[16];
 static char s_buf_countdown[24];
 
+static int s_scale_from_width(int width, int numerator, int denominator) {
+  return (width * numerator + denominator / 2) / denominator;
+}
+
+#ifndef PBL_ROUND
+static bool s_is_large_rect_display(GRect bounds) {
+  return bounds.size.w >= 180 || bounds.size.h >= 200;
+}
+#endif
+
 static int32_t s_normalize_minutes(int32_t minutes) {
   minutes %= MINUTES_PER_DAY;
   if (minutes < 0) {
@@ -357,22 +367,23 @@ static RingMetrics s_get_ring_metrics(GRect bounds) {
   metrics.golden_stroke_width = 12;
   metrics.marker_radius = 6;
 #else
-  int inset_x = 4;
-  int inset_y = 4;
+  bool large_rect = s_is_large_rect_display(bounds);
+  int inset_x = large_rect ? 6 : 4;
+  int inset_y = large_rect ? 6 : 4;
   metrics.rect = GRect(inset_x,
                        inset_y,
                        bounds.size.w - inset_x * 2,
                        bounds.size.h - inset_y * 2);
   metrics.corner_radius = metrics.rect.size.h / 6;
-  if (metrics.corner_radius < 18) {
-    metrics.corner_radius = 18;
+  if (metrics.corner_radius < (large_rect ? 22 : 18)) {
+    metrics.corner_radius = large_rect ? 22 : 18;
   }
-  if (metrics.corner_radius > 26) {
-    metrics.corner_radius = 26;
+  if (metrics.corner_radius > (large_rect ? 32 : 26)) {
+    metrics.corner_radius = large_rect ? 32 : 26;
   }
-  metrics.stroke_width = 10;
-  metrics.golden_stroke_width = 10;
-  metrics.marker_radius = 5;
+  metrics.stroke_width = large_rect ? 12 : 10;
+  metrics.golden_stroke_width = large_rect ? 12 : 10;
+  metrics.marker_radius = large_rect ? 6 : 5;
 #endif
 
   return metrics;
@@ -809,8 +820,13 @@ static void prv_window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(root);
   int w = bounds.size.w;
+  const char *location_font_key;
+  const char *event_name_font_key;
+  const char *event_time_font_key;
+  const char *countdown_font_key;
 
 #ifdef PBL_ROUND
+  bool large_round = bounds.size.w >= 220 || bounds.size.h >= 220;
   int inset = 22;
   int loc_y = 34;
   int loc_h = 18;
@@ -822,18 +838,37 @@ static void prv_window_load(Window *window) {
   int time_h = 34;
   int countdown_y = 118;
   int countdown_h = 18;
+  inset = s_scale_from_width(w, 12, 100);
+  loc_y = s_scale_from_width(w, 19, 100);
+  loc_h = s_scale_from_width(w, 10, 100);
+  next_y = s_scale_from_width(w, 34, 100);
+  next_h = s_scale_from_width(w, 10, 100);
+  time_y = s_scale_from_width(w, 45, 100);
+  time_h = s_scale_from_width(w, 19, 100);
+  countdown_y = s_scale_from_width(w, 66, 100);
+  countdown_h = s_scale_from_width(w, 10, 100);
+  location_font_key = large_round ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_14_BOLD;
+  event_name_font_key = large_round ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_14_BOLD;
+  event_time_font_key = large_round ? FONT_KEY_GOTHIC_28_BOLD : FONT_KEY_GOTHIC_24_BOLD;
+  countdown_font_key = large_round ? FONT_KEY_GOTHIC_18 : FONT_KEY_GOTHIC_14;
 #else
-  int inset = 14;
-  int loc_y = 24;
-  int loc_h = 18;
+  bool large_rect = s_is_large_rect_display(bounds);
+  int inset = s_scale_from_width(w, 10, 100);
+  int loc_y = s_scale_from_width(w, 17, 100);
+  int loc_h = s_scale_from_width(w, 13, 100);
   int status_y = 0;
   int status_h = 0;
-  int next_y = 54;
-  int next_h = 18;
-  int time_y = 76;
-  int time_h = 34;
-  int countdown_y = 110;
-  int countdown_h = 18;
+  int next_y = s_scale_from_width(w, 38, 100);
+  int next_h = s_scale_from_width(w, 11, 100);
+  int time_y = s_scale_from_width(w, 53, 100);
+  int time_h = s_scale_from_width(w, 24, 100);
+  int countdown_y = s_scale_from_width(w, 77, 100);
+  int countdown_h = s_scale_from_width(w, 11, 100);
+
+  location_font_key = large_rect ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_14_BOLD;
+  event_name_font_key = large_rect ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_14_BOLD;
+  event_time_font_key = large_rect ? FONT_KEY_GOTHIC_28_BOLD : FONT_KEY_GOTHIC_24_BOLD;
+  countdown_font_key = large_rect ? FONT_KEY_GOTHIC_18 : FONT_KEY_GOTHIC_14;
 #endif
   int eff_w = w - inset * 2;
 
@@ -848,7 +883,7 @@ static void prv_window_load(Window *window) {
   layer_add_child(root, s_ring_layer);
 
   s_tl_location = text_layer_create(GRect(inset, loc_y, eff_w, loc_h));
-  text_layer_set_font(s_tl_location, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+  text_layer_set_font(s_tl_location, fonts_get_system_font(location_font_key));
   text_layer_set_text_alignment(s_tl_location, GTextAlignmentCenter);
   text_layer_set_background_color(s_tl_location, GColorClear);
   layer_add_child(root, text_layer_get_layer(s_tl_location));
@@ -861,20 +896,19 @@ static void prv_window_load(Window *window) {
   layer_add_child(root, text_layer_get_layer(s_tl_status));
 
   s_tl_event_time = text_layer_create(GRect(inset, time_y, eff_w, time_h));
-  text_layer_set_font(s_tl_event_time,
-                      fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+  text_layer_set_font(s_tl_event_time, fonts_get_system_font(event_time_font_key));
   text_layer_set_text_alignment(s_tl_event_time, GTextAlignmentCenter);
   text_layer_set_background_color(s_tl_event_time, GColorClear);
   layer_add_child(root, text_layer_get_layer(s_tl_event_time));
 
   s_tl_event_name = text_layer_create(GRect(inset, next_y, eff_w, next_h));
-  text_layer_set_font(s_tl_event_name, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+  text_layer_set_font(s_tl_event_name, fonts_get_system_font(event_name_font_key));
   text_layer_set_text_alignment(s_tl_event_name, GTextAlignmentCenter);
   text_layer_set_background_color(s_tl_event_name, GColorClear);
   layer_add_child(root, text_layer_get_layer(s_tl_event_name));
 
   s_tl_countdown = text_layer_create(GRect(inset, countdown_y, eff_w, countdown_h));
-  text_layer_set_font(s_tl_countdown, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_font(s_tl_countdown, fonts_get_system_font(countdown_font_key));
   text_layer_set_text_alignment(s_tl_countdown, GTextAlignmentCenter);
   text_layer_set_background_color(s_tl_countdown, GColorClear);
   layer_add_child(root, text_layer_get_layer(s_tl_countdown));
