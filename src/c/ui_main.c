@@ -2,339 +2,834 @@
 #include "solar.h"
 #include "storage.h"
 
-// -------------------------------------------------------------------------
-// Layout constants
-// -------------------------------------------------------------------------
-#define STATUS_BAR_H   16
+#define RING_PI 3.14159265f
 
-// Vertical positions for rectangular screens (origin = top of window)
-#define RECT_LOC_Y     (STATUS_BAR_H + 2)
-#define RECT_LOC_H     18
-#define RECT_STATUS_Y  (RECT_LOC_Y + RECT_LOC_H + 1)
-#define RECT_STATUS_H  16
-#define RECT_NAME_Y    (RECT_STATUS_Y + RECT_STATUS_H + 8)
-#define RECT_NAME_H    22
-#define RECT_TIME_Y    (RECT_NAME_Y + RECT_NAME_H + 2)
-#define RECT_TIME_H    36
-#define RECT_CD_Y      (RECT_TIME_Y + RECT_TIME_H + 4)
-#define RECT_CD_H      16
+typedef enum {
+  SOLAR_PHASE_NIGHT = 0,
+  SOLAR_PHASE_TWILIGHT,
+  SOLAR_PHASE_GOLDEN,
+  SOLAR_PHASE_DAY,
+  SOLAR_PHASE_POLAR_DAY,
+  SOLAR_PHASE_POLAR_NIGHT,
+} SolarPhase;
 
-// Vertical positions for round screens (chalk 180×180)
-#define ROUND_INSET    18
-#define ROUND_W        144  // safe inner width
-#define ROUND_LOC_Y    (ROUND_INSET + 6)
-#define ROUND_LOC_H    18
-#define ROUND_STATUS_Y (ROUND_LOC_Y + ROUND_LOC_H + 2)
-#define ROUND_STATUS_H 16
-#define ROUND_NAME_Y   (ROUND_STATUS_Y + ROUND_STATUS_H + 6)
-#define ROUND_NAME_H   22
-#define ROUND_TIME_Y   (ROUND_NAME_Y + ROUND_NAME_H + 2)
-#define ROUND_TIME_H   36
-#define ROUND_CD_Y     (ROUND_TIME_Y + ROUND_TIME_H + 4)
-#define ROUND_CD_H     16
+typedef struct {
+  bool      found;
+  int32_t   local_minutes;
+  bool      is_tomorrow;
+  bool      is_sunrise;
+} NextEvent;
 
-// -------------------------------------------------------------------------
-// Window data
-// -------------------------------------------------------------------------
-static Window    *s_window;
-static TextLayer *s_tl_location;
-static TextLayer *s_tl_status;
-static TextLayer *s_tl_event_name;
-static TextLayer *s_tl_event_time;
-static TextLayer *s_tl_countdown;
+typedef struct {
+  bool      found;
+  int32_t   local_minutes;
+  bool      is_tomorrow;
+} NextGoldenHour;
 
-// Buffers (static so they persist after window load)
+typedef struct {
+  GRect rect;
+  int   corner_radius;
+  int   stroke_width;
+  int   golden_stroke_width;
+  int   marker_radius;
+} RingMetrics;
+
+static Window         *s_window;
+static Layer          *s_ring_layer;
+static TextLayer      *s_tl_location;
+static TextLayer      *s_tl_status;
+static TextLayer      *s_tl_event_name;
+static TextLayer      *s_tl_event_time;
+static TextLayer      *s_tl_countdown;
+static SolarDayResult  s_cached_today;
+static SolarDayResult  s_cached_tomorrow;
+static Location        s_cached_loc;
+static bool            s_has_data;
+
 static char s_buf_location[LOC_NAME_LEN + 4];
-static char s_buf_status[24];
-static char s_buf_event_name[24];
+static char s_buf_status[32];
+static char s_buf_event_name[32];
 static char s_buf_event_time[16];
 static char s_buf_countdown[24];
 
-// -------------------------------------------------------------------------
-// Helpers
-// -------------------------------------------------------------------------
-typedef struct {
-  bool      found;
-  int32_t   local_minutes;  // of the event
-  bool      is_tomorrow;
-  bool      is_sunrise;     // true=sunrise, false=sunset
-} NextEvent;
+static int32_t s_normalize_minutes(int32_t minutes) {
+  minutes %= MINUTES_PER_DAY;
+  if (minutes < 0) {
+    minutes += MINUTES_PER_DAY;
+  }
+  return minutes;
+}
 
-// Determine current local time in minutes from midnight
+static bool s_event_ok(const SolarEvent *event) {
+  return event->status == SOLAR_STATUS_OK;
+}
+
 static int32_t s_local_minutes_now(int utc_offset_min) {
-  time_t now     = time(NULL);
-  time_t loc     = now + (time_t)utc_offset_min * 60;
-  struct tm *t   = gmtime(&loc);
+  time_t now = time(NULL);
+  time_t local = now + (time_t)utc_offset_min * 60;
+  struct tm *t = gmtime(&local);
   return (int32_t)(t->tm_hour * 60 + t->tm_min);
 }
 
-// Find the next SUNRISE or SUNSET relative to current local time.
-static NextEvent s_find_next_event(const SolarDayResult *today,
-                                   const SolarDayResult *tomorrow,
-                                   int32_t current_min) {
-  NextEvent ne = {false, 0, false, false};
-
-  // Try today's sunset first (if we're before it)
-  if (today->events[SOLAR_EVENT_SUNSET].status == SOLAR_STATUS_OK) {
-    int32_t ss = today->events[SOLAR_EVENT_SUNSET].local_minutes;
-    if (current_min < ss) {
-      // Daytime: next event is today's sunset
-      ne.found = true;
-      ne.local_minutes = ss;
-      ne.is_tomorrow   = false;
-      ne.is_sunrise    = false;
-      return ne;
-    }
-  }
-
-  // Try today's sunrise (if we're before it — i.e. very early morning)
-  if (today->events[SOLAR_EVENT_SUNRISE].status == SOLAR_STATUS_OK) {
-    int32_t sr = today->events[SOLAR_EVENT_SUNRISE].local_minutes;
-    if (current_min < sr) {
-      ne.found = true;
-      ne.local_minutes = sr;
-      ne.is_tomorrow   = false;
-      ne.is_sunrise    = true;
-      return ne;
-    }
-  }
-
-  // Past sunset (or no sunset today) → find tomorrow's sunrise
-  if (tomorrow->events[SOLAR_EVENT_SUNRISE].status == SOLAR_STATUS_OK) {
-    ne.found = true;
-    ne.local_minutes = tomorrow->events[SOLAR_EVENT_SUNRISE].local_minutes;
-    ne.is_tomorrow   = true;
-    ne.is_sunrise    = true;
-    return ne;
-  }
-
-  // Fallback: tomorrow's sunset
-  if (tomorrow->events[SOLAR_EVENT_SUNSET].status == SOLAR_STATUS_OK) {
-    ne.found = true;
-    ne.local_minutes = tomorrow->events[SOLAR_EVENT_SUNSET].local_minutes;
-    ne.is_tomorrow   = true;
-    ne.is_sunrise    = false;
-  }
-
-  return ne;
+static void s_format_time_minutes(int32_t minutes, char *buf, size_t len) {
+  minutes = s_normalize_minutes(minutes);
+  snprintf(buf, len, "%02d:%02d", (int)(minutes / 60), (int)(minutes % 60));
 }
 
-static bool s_is_daytime(const SolarDayResult *today, int32_t current_min) {
-  bool has_sr = today->events[SOLAR_EVENT_SUNRISE].status == SOLAR_STATUS_OK;
-  bool has_ss = today->events[SOLAR_EVENT_SUNSET].status == SOLAR_STATUS_OK;
-  if (!has_sr || !has_ss) return today->is_polar_day;
-  int32_t sr = today->events[SOLAR_EVENT_SUNRISE].local_minutes;
-  int32_t ss = today->events[SOLAR_EVENT_SUNSET].local_minutes;
-  return (current_min >= sr && current_min < ss);
+static void s_format_duration_minutes(int32_t delta_minutes, char *buf, size_t len) {
+  if (delta_minutes <= 0) {
+    snprintf(buf, len, "Now");
+    return;
+  }
+
+  if (delta_minutes >= 60) {
+    snprintf(buf, len, "%dh %02dm",
+             (int)(delta_minutes / 60),
+             (int)(delta_minutes % 60));
+    return;
+  }
+
+  snprintf(buf, len, "%dm", (int)delta_minutes);
 }
 
-// Format a date encoded as YYYYMMDD into a readable string (e.g. "Apr 15")
 static void s_format_date(int32_t yyyymmdd, char *buf, size_t len) {
-  if (yyyymmdd == 0) { snprintf(buf, len, "?"); return; }
+  if (yyyymmdd == 0) {
+    snprintf(buf, len, "?");
+    return;
+  }
+
   int month = (int)((yyyymmdd % 10000) / 100);
-  int day   = (int)(yyyymmdd % 100);
+  int day = (int)(yyyymmdd % 100);
   static const char *months[] = {
     "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
   };
-  const char *mname = (month >= 1 && month <= 12) ? months[month] : "?";
-  snprintf(buf, len, "%s %d", mname, day);
+  const char *month_name = (month >= 1 && month <= 12) ? months[month] : "?";
+  snprintf(buf, len, "%s %d", month_name, day);
 }
 
-// -------------------------------------------------------------------------
-// Update logic
-// -------------------------------------------------------------------------
+static bool s_minute_in_interval(int32_t minute, int32_t start, int32_t end) {
+  minute = s_normalize_minutes(minute);
+  start = s_normalize_minutes(start);
+  end = s_normalize_minutes(end);
+
+  if (start == end) {
+    return false;
+  }
+  if (start < end) {
+    return minute >= start && minute < end;
+  }
+  return minute >= start || minute < end;
+}
+
+static int32_t s_minutes_until(int32_t current_min, int32_t target_min, bool is_tomorrow) {
+  int32_t delta = target_min - current_min;
+  if (is_tomorrow) {
+    delta += MINUTES_PER_DAY;
+  }
+  if (delta < 0) {
+    delta += MINUTES_PER_DAY;
+  }
+  return delta;
+}
+
+static void s_format_event_line(const char *label,
+                                int32_t local_minutes,
+                                bool is_tomorrow,
+                                char *buf,
+                                size_t len) {
+  char time_buf[8];
+  s_format_time_minutes(local_minutes, time_buf, sizeof(time_buf));
+
+  if (is_tomorrow) {
+    snprintf(buf, len, "Tomorrow %s %s", label, time_buf);
+    return;
+  }
+
+  snprintf(buf, len, "%s %s", label, time_buf);
+}
+
+static NextEvent s_find_next_event(const SolarDayResult *today,
+                                   const SolarDayResult *tomorrow,
+                                   int32_t current_min) {
+  NextEvent next = {false, 0, false, false};
+
+  if (today->events[SOLAR_EVENT_SUNRISE].status == SOLAR_STATUS_OK) {
+    int32_t sunrise = today->events[SOLAR_EVENT_SUNRISE].local_minutes;
+    if (current_min < sunrise) {
+      next.found = true;
+      next.local_minutes = sunrise;
+      next.is_tomorrow = false;
+      next.is_sunrise = true;
+      return next;
+    }
+  }
+
+  if (today->events[SOLAR_EVENT_SUNSET].status == SOLAR_STATUS_OK) {
+    int32_t sunset = today->events[SOLAR_EVENT_SUNSET].local_minutes;
+    if (current_min < sunset) {
+      next.found = true;
+      next.local_minutes = sunset;
+      next.is_tomorrow = false;
+      next.is_sunrise = false;
+      return next;
+    }
+  }
+
+  if (tomorrow->events[SOLAR_EVENT_SUNRISE].status == SOLAR_STATUS_OK) {
+    next.found = true;
+    next.local_minutes = tomorrow->events[SOLAR_EVENT_SUNRISE].local_minutes;
+    next.is_tomorrow = true;
+    next.is_sunrise = true;
+    return next;
+  }
+
+  if (tomorrow->events[SOLAR_EVENT_SUNSET].status == SOLAR_STATUS_OK) {
+    next.found = true;
+    next.local_minutes = tomorrow->events[SOLAR_EVENT_SUNSET].local_minutes;
+    next.is_tomorrow = true;
+    next.is_sunrise = false;
+  }
+
+  return next;
+}
+
+static NextGoldenHour s_find_next_golden_hour(const SolarDayResult *today,
+                                              const SolarDayResult *tomorrow,
+                                              int32_t current_min) {
+  NextGoldenHour next = {false, 0, false};
+
+  if (today->events[SOLAR_EVENT_GOLDEN_MORNING].status == SOLAR_STATUS_OK) {
+    int32_t morning = today->events[SOLAR_EVENT_GOLDEN_MORNING].local_minutes;
+    if (current_min < morning) {
+      next.found = true;
+      next.local_minutes = morning;
+      next.is_tomorrow = false;
+      return next;
+    }
+  }
+
+  if (today->events[SOLAR_EVENT_GOLDEN_EVENING].status == SOLAR_STATUS_OK) {
+    int32_t evening = today->events[SOLAR_EVENT_GOLDEN_EVENING].local_minutes;
+    if (current_min < evening) {
+      next.found = true;
+      next.local_minutes = evening;
+      next.is_tomorrow = false;
+      return next;
+    }
+  }
+
+  if (tomorrow->events[SOLAR_EVENT_GOLDEN_MORNING].status == SOLAR_STATUS_OK) {
+    next.found = true;
+    next.local_minutes = tomorrow->events[SOLAR_EVENT_GOLDEN_MORNING].local_minutes;
+    next.is_tomorrow = true;
+    return next;
+  }
+
+  if (tomorrow->events[SOLAR_EVENT_GOLDEN_EVENING].status == SOLAR_STATUS_OK) {
+    next.found = true;
+    next.local_minutes = tomorrow->events[SOLAR_EVENT_GOLDEN_EVENING].local_minutes;
+    next.is_tomorrow = true;
+  }
+
+  return next;
+}
+
+static bool s_is_daytime(const SolarDayResult *today, int32_t current_min) {
+  bool has_sunrise = s_event_ok(&today->events[SOLAR_EVENT_SUNRISE]);
+  bool has_sunset = s_event_ok(&today->events[SOLAR_EVENT_SUNSET]);
+
+  if (!has_sunrise || !has_sunset) {
+    return today->is_polar_day;
+  }
+
+  return s_minute_in_interval(current_min,
+                              today->events[SOLAR_EVENT_SUNRISE].local_minutes,
+                              today->events[SOLAR_EVENT_SUNSET].local_minutes);
+}
+
+static bool s_is_morning_golden(const SolarDayResult *today, int32_t current_min) {
+  return s_event_ok(&today->events[SOLAR_EVENT_GOLDEN_MORNING]) &&
+         s_event_ok(&today->golden_morning_end) &&
+         s_minute_in_interval(current_min,
+                              today->events[SOLAR_EVENT_GOLDEN_MORNING].local_minutes,
+                              today->golden_morning_end.local_minutes);
+}
+
+static bool s_is_evening_golden(const SolarDayResult *today, int32_t current_min) {
+  return s_event_ok(&today->events[SOLAR_EVENT_GOLDEN_EVENING]) &&
+         s_event_ok(&today->events[SOLAR_EVENT_DUSK_GLOW]) &&
+         s_minute_in_interval(current_min,
+                              today->events[SOLAR_EVENT_GOLDEN_EVENING].local_minutes,
+                              today->events[SOLAR_EVENT_DUSK_GLOW].local_minutes);
+}
+
+static bool s_is_twilight(const SolarDayResult *today, int32_t current_min) {
+  bool morning_twilight = s_event_ok(&today->events[SOLAR_EVENT_FIRST_LIGHT]) &&
+                          s_event_ok(&today->events[SOLAR_EVENT_GOLDEN_MORNING]) &&
+                          s_minute_in_interval(current_min,
+                                               today->events[SOLAR_EVENT_FIRST_LIGHT].local_minutes,
+                                               today->events[SOLAR_EVENT_GOLDEN_MORNING].local_minutes);
+  bool evening_twilight = s_event_ok(&today->events[SOLAR_EVENT_DUSK_GLOW]) &&
+                          s_event_ok(&today->events[SOLAR_EVENT_LAST_LIGHT]) &&
+                          s_minute_in_interval(current_min,
+                                               today->events[SOLAR_EVENT_DUSK_GLOW].local_minutes,
+                                               today->events[SOLAR_EVENT_LAST_LIGHT].local_minutes);
+  return morning_twilight || evening_twilight;
+}
+
+static SolarPhase s_phase_for_minute(const SolarDayResult *today, int32_t current_min) {
+  if (today->is_polar_day) {
+    return SOLAR_PHASE_POLAR_DAY;
+  }
+  if (today->is_polar_night) {
+    return SOLAR_PHASE_POLAR_NIGHT;
+  }
+  if (s_is_morning_golden(today, current_min) || s_is_evening_golden(today, current_min)) {
+    return SOLAR_PHASE_GOLDEN;
+  }
+  if (s_is_twilight(today, current_min)) {
+    return SOLAR_PHASE_TWILIGHT;
+  }
+  if (s_is_daytime(today, current_min)) {
+    return SOLAR_PHASE_DAY;
+  }
+  return SOLAR_PHASE_NIGHT;
+}
+
+static const char *s_phase_label(const SolarDayResult *today, int32_t current_min) {
+  if (today->is_polar_day) {
+    return "Polar Day";
+  }
+  if (today->is_polar_night) {
+    return "Polar Night";
+  }
+  if (s_is_morning_golden(today, current_min)) {
+    return "Morning Golden Hour";
+  }
+  if (s_is_evening_golden(today, current_min)) {
+    return "Evening Golden Hour";
+  }
+  if (s_is_twilight(today, current_min)) {
+    return "Twilight";
+  }
+  return s_is_daytime(today, current_min) ? "Day" : "Night";
+}
+
+#ifdef PBL_COLOR
+#define APOLLO_RING_NIGHT  GColorDukeBlue
+#define APOLLO_RING_DAY    GColorPictonBlue
+#define APOLLO_RING_GOLDEN GColorOrange
+#define APOLLO_SUN_COLOR   GColorRed
+#define APOLLO_TIME_SUN    GColorOrange
+#define APOLLO_TIME_GOLDEN GColorYellow
+
+static GColor s_status_color_for_phase(SolarPhase phase) {
+  switch (phase) {
+    case SOLAR_PHASE_GOLDEN:
+      return GColorChromeYellow;
+    case SOLAR_PHASE_TWILIGHT:
+      return GColorCyan;
+    case SOLAR_PHASE_DAY:
+    case SOLAR_PHASE_POLAR_DAY:
+      return GColorWhite;
+    case SOLAR_PHASE_POLAR_NIGHT:
+    case SOLAR_PHASE_NIGHT:
+    default:
+      return GColorLightGray;
+  }
+}
+#endif
+
+static RingMetrics s_get_ring_metrics(GRect bounds) {
+  RingMetrics metrics;
+
+#ifdef PBL_ROUND
+  int inset = 4;
+  int diameter = bounds.size.w < bounds.size.h ? bounds.size.w : bounds.size.h;
+  diameter -= inset * 2;
+  metrics.rect = GRect((bounds.size.w - diameter) / 2,
+                       (bounds.size.h - diameter) / 2,
+                       diameter,
+                       diameter);
+  metrics.corner_radius = diameter / 2;
+  metrics.stroke_width = 12;
+  metrics.golden_stroke_width = 12;
+  metrics.marker_radius = 6;
+#else
+  int inset_x = 4;
+  int inset_y = 4;
+  metrics.rect = GRect(inset_x,
+                       inset_y,
+                       bounds.size.w - inset_x * 2,
+                       bounds.size.h - inset_y * 2);
+  metrics.corner_radius = metrics.rect.size.h / 6;
+  if (metrics.corner_radius < 18) {
+    metrics.corner_radius = 18;
+  }
+  if (metrics.corner_radius > 26) {
+    metrics.corner_radius = 26;
+  }
+  metrics.stroke_width = 10;
+  metrics.golden_stroke_width = 10;
+  metrics.marker_radius = 5;
+#endif
+
+  return metrics;
+}
+
+static GPoint s_arc_point(float cx, float cy, int radius, int32_t angle_units) {
+  int32_t cos_v = cos_lookup(angle_units);
+  int32_t sin_v = sin_lookup(angle_units);
+  return GPoint((int16_t)(cx + (radius * cos_v) / TRIG_MAX_RATIO),
+                (int16_t)(cy + (radius * sin_v) / TRIG_MAX_RATIO));
+}
+
+#ifdef PBL_ROUND
+static GPoint s_point_on_round_ring(const RingMetrics *metrics, float fraction) {
+  int32_t angle = (int32_t)(fraction * TRIG_MAX_ANGLE) - TRIG_MAX_ANGLE / 4;
+  int radius = metrics->rect.size.w / 2;
+  float cx = metrics->rect.origin.x + metrics->rect.size.w / 2.0f;
+  float cy = metrics->rect.origin.y + metrics->rect.size.h / 2.0f;
+  return s_arc_point(cx, cy, radius, angle);
+}
+#else
+static GPoint s_point_on_rect_ring(const RingMetrics *metrics, float fraction) {
+  float left = metrics->rect.origin.x;
+  float top = metrics->rect.origin.y;
+  float right = metrics->rect.origin.x + metrics->rect.size.w - 1;
+  float bottom = metrics->rect.origin.y + metrics->rect.size.h - 1;
+  int radius = metrics->corner_radius;
+  float top_half = (right - left - 2.0f * radius) * 0.5f;
+  float side = bottom - top - 2.0f * radius;
+  float bottom_edge = right - left - 2.0f * radius;
+  float arc = RING_PI * radius * 0.5f;
+  float total = top_half * 2.0f + bottom_edge + side * 2.0f + arc * 4.0f;
+  float distance = fraction * total;
+  float center_x = (left + right) * 0.5f;
+
+  if (distance < top_half) {
+    return GPoint((int16_t)(center_x + distance), (int16_t)top);
+  }
+  distance -= top_half;
+
+  if (distance < arc) {
+    float part = distance / arc;
+    int32_t angle = -TRIG_MAX_ANGLE / 4 + (int32_t)(part * (TRIG_MAX_ANGLE / 4));
+    return s_arc_point(right - radius, top + radius, radius, angle);
+  }
+  distance -= arc;
+
+  if (distance < side) {
+    return GPoint((int16_t)right, (int16_t)(top + radius + distance));
+  }
+  distance -= side;
+
+  if (distance < arc) {
+    float part = distance / arc;
+    int32_t angle = (int32_t)(part * (TRIG_MAX_ANGLE / 4));
+    return s_arc_point(right - radius, bottom - radius, radius, angle);
+  }
+  distance -= arc;
+
+  if (distance < bottom_edge) {
+    return GPoint((int16_t)(right - radius - distance), (int16_t)bottom);
+  }
+  distance -= bottom_edge;
+
+  if (distance < arc) {
+    float part = distance / arc;
+    int32_t angle = TRIG_MAX_ANGLE / 4 + (int32_t)(part * (TRIG_MAX_ANGLE / 4));
+    return s_arc_point(left + radius, bottom - radius, radius, angle);
+  }
+  distance -= arc;
+
+  if (distance < side) {
+    return GPoint((int16_t)left, (int16_t)(bottom - radius - distance));
+  }
+  distance -= side;
+
+  if (distance < arc) {
+    float part = distance / arc;
+    int32_t angle = TRIG_MAX_ANGLE / 2 + (int32_t)(part * (TRIG_MAX_ANGLE / 4));
+    return s_arc_point(left + radius, top + radius, radius, angle);
+  }
+  distance -= arc;
+
+  return GPoint((int16_t)(left + radius + distance), (int16_t)top);
+}
+#endif
+
+static GPoint s_point_on_ring(const RingMetrics *metrics, float fraction) {
+  fraction += 0.5f;
+  if (fraction >= 1.0f) {
+    fraction -= 1.0f;
+  }
+#ifdef PBL_ROUND
+  return s_point_on_round_ring(metrics, fraction);
+#else
+  return s_point_on_rect_ring(metrics, fraction);
+#endif
+}
+
+static void s_draw_ring_range(GContext *ctx,
+                              const RingMetrics *metrics,
+                              int32_t start_min,
+                              int32_t end_min,
+                              GColor color,
+                              int width) {
+  int32_t duration = end_min - start_min;
+  int steps;
+  GPoint prev;
+
+  if (duration <= 0) {
+    return;
+  }
+
+  graphics_context_set_stroke_color(ctx, color);
+  graphics_context_set_stroke_width(ctx, width);
+  steps = (duration * 180) / MINUTES_PER_DAY;
+  if (steps < 2) {
+    steps = 2;
+  }
+
+  prev = s_point_on_ring(metrics, (float)start_min / (float)MINUTES_PER_DAY);
+  for (int i = 1; i <= steps; i++) {
+    int32_t minute = start_min + (duration * i) / steps;
+    GPoint point = s_point_on_ring(metrics, (float)minute / (float)MINUTES_PER_DAY);
+    graphics_draw_line(ctx, prev, point);
+    prev = point;
+  }
+}
+
+static void s_draw_ring_segment(GContext *ctx,
+                                const RingMetrics *metrics,
+                                int32_t start_min,
+                                int32_t end_min,
+                                GColor color,
+                                int width) {
+  start_min = s_normalize_minutes(start_min);
+  end_min = s_normalize_minutes(end_min);
+
+  if (start_min == end_min) {
+    return;
+  }
+
+  if (start_min < end_min) {
+    s_draw_ring_range(ctx, metrics, start_min, end_min, color, width);
+    return;
+  }
+
+  s_draw_ring_range(ctx, metrics, start_min, MINUTES_PER_DAY, color, width);
+  s_draw_ring_range(ctx, metrics, 0, end_min, color, width);
+}
+
+static void s_ring_update_proc(Layer *layer, GContext *ctx) {
+  if (!s_has_data) {
+    return;
+  }
+
+  RingMetrics metrics = s_get_ring_metrics(layer_get_bounds(layer));
+  int32_t current_min = s_local_minutes_now(s_cached_loc.utc_offset_min);
+  SolarPhase current_phase = s_phase_for_minute(&s_cached_today, current_min);
+
+#ifdef PBL_COLOR
+  s_draw_ring_range(ctx, &metrics, 0, MINUTES_PER_DAY, APOLLO_RING_NIGHT, metrics.stroke_width);
+
+  if (s_cached_today.is_polar_day) {
+    s_draw_ring_range(ctx, &metrics, 0, MINUTES_PER_DAY, APOLLO_RING_DAY, metrics.stroke_width);
+  } else if (!s_cached_today.is_polar_night) {
+    if (s_event_ok(&s_cached_today.events[SOLAR_EVENT_SUNRISE]) &&
+        s_event_ok(&s_cached_today.events[SOLAR_EVENT_SUNSET])) {
+      s_draw_ring_segment(ctx, &metrics,
+                          s_cached_today.events[SOLAR_EVENT_SUNRISE].local_minutes,
+                          s_cached_today.events[SOLAR_EVENT_SUNSET].local_minutes,
+                          APOLLO_RING_DAY,
+                          metrics.stroke_width);
+    }
+
+    if (s_event_ok(&s_cached_today.events[SOLAR_EVENT_GOLDEN_MORNING]) &&
+        s_event_ok(&s_cached_today.golden_morning_end)) {
+      s_draw_ring_segment(ctx, &metrics,
+                          s_cached_today.events[SOLAR_EVENT_GOLDEN_MORNING].local_minutes,
+                          s_cached_today.golden_morning_end.local_minutes,
+                          APOLLO_RING_GOLDEN,
+                          metrics.golden_stroke_width);
+    }
+
+    if (s_event_ok(&s_cached_today.events[SOLAR_EVENT_GOLDEN_EVENING]) &&
+        s_event_ok(&s_cached_today.events[SOLAR_EVENT_DUSK_GLOW])) {
+      s_draw_ring_segment(ctx, &metrics,
+                          s_cached_today.events[SOLAR_EVENT_GOLDEN_EVENING].local_minutes,
+                          s_cached_today.events[SOLAR_EVENT_DUSK_GLOW].local_minutes,
+                          APOLLO_RING_GOLDEN,
+                          metrics.golden_stroke_width);
+    }
+  }
+#else
+  s_draw_ring_range(ctx, &metrics, 0, MINUTES_PER_DAY, GColorBlack, 2);
+
+  if (s_cached_today.is_polar_day) {
+    s_draw_ring_range(ctx, &metrics, 0, MINUTES_PER_DAY, GColorBlack, metrics.stroke_width);
+  } else if (!s_cached_today.is_polar_night) {
+    if (s_event_ok(&s_cached_today.events[SOLAR_EVENT_SUNRISE]) &&
+        s_event_ok(&s_cached_today.events[SOLAR_EVENT_SUNSET])) {
+      s_draw_ring_segment(ctx, &metrics,
+                          s_cached_today.events[SOLAR_EVENT_SUNRISE].local_minutes,
+                          s_cached_today.events[SOLAR_EVENT_SUNSET].local_minutes,
+                          GColorBlack,
+                          metrics.stroke_width);
+    }
+
+    if (s_event_ok(&s_cached_today.events[SOLAR_EVENT_GOLDEN_MORNING]) &&
+        s_event_ok(&s_cached_today.golden_morning_end)) {
+      s_draw_ring_segment(ctx, &metrics,
+                          s_cached_today.events[SOLAR_EVENT_GOLDEN_MORNING].local_minutes,
+                          s_cached_today.golden_morning_end.local_minutes,
+                          GColorBlack,
+                          metrics.golden_stroke_width);
+    }
+
+    if (s_event_ok(&s_cached_today.events[SOLAR_EVENT_GOLDEN_EVENING]) &&
+        s_event_ok(&s_cached_today.events[SOLAR_EVENT_DUSK_GLOW])) {
+      s_draw_ring_segment(ctx, &metrics,
+                          s_cached_today.events[SOLAR_EVENT_GOLDEN_EVENING].local_minutes,
+                          s_cached_today.events[SOLAR_EVENT_DUSK_GLOW].local_minutes,
+                          GColorBlack,
+                          metrics.golden_stroke_width);
+    }
+  }
+#endif
+
+  int marker_radius = metrics.marker_radius;
+  if (current_phase == SOLAR_PHASE_GOLDEN) {
+    marker_radius += 1;
+  }
+
+  GPoint marker = s_point_on_ring(&metrics,
+                                  (float)current_min / (float)MINUTES_PER_DAY);
+#ifdef PBL_COLOR
+  graphics_context_set_fill_color(ctx, APOLLO_SUN_COLOR);
+  graphics_fill_circle(ctx, marker, marker_radius);
+#else
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_circle(ctx, marker, marker_radius);
+#endif
+}
+
 static void s_do_update(const SolarDayResult *today,
                         const SolarDayResult *tomorrow,
                         const Location *loc) {
-  // Location name
+  int32_t current_min;
+  SolarPhase phase;
+#ifdef PBL_COLOR
+  GColor event_time_color = GColorWhite;
+#endif
+
+  s_cached_today = *today;
+  s_cached_tomorrow = *tomorrow;
+  s_cached_loc = *loc;
+  s_has_data = true;
+
   snprintf(s_buf_location, sizeof(s_buf_location), "%s", loc->name);
   text_layer_set_text(s_tl_location, s_buf_location);
 
-  int32_t current_min = s_local_minutes_now(loc->utc_offset_min);
-  bool daytime        = s_is_daytime(today, current_min);
-
-  // Status label
-  if (today->is_polar_day) {
-    snprintf(s_buf_status, sizeof(s_buf_status), "Polar Day");
-  } else if (today->is_polar_night) {
-    snprintf(s_buf_status, sizeof(s_buf_status), "Polar Night");
-  } else {
-    snprintf(s_buf_status, sizeof(s_buf_status), "%s", daytime ? "Day" : "Night");
-  }
+  current_min = s_local_minutes_now(loc->utc_offset_min);
+  phase = s_phase_for_minute(today, current_min);
+  snprintf(s_buf_status, sizeof(s_buf_status), "%s", s_phase_label(today, current_min));
   text_layer_set_text(s_tl_status, s_buf_status);
 
-  // Color the status bar on color devices
-#ifdef PBL_COLOR
-  if (today->is_polar_day) {
-    text_layer_set_background_color(s_tl_status, GColorChromeYellow);
-    text_layer_set_text_color(s_tl_status, GColorBlack);
-  } else if (today->is_polar_night) {
-    text_layer_set_background_color(s_tl_status, GColorMidnightGreen);
-    text_layer_set_text_color(s_tl_status, GColorWhite);
-  } else if (daytime) {
-    text_layer_set_background_color(s_tl_status, GColorOxfordBlue);
-    text_layer_set_text_color(s_tl_status, GColorWhite);
-  } else {
-    text_layer_set_background_color(s_tl_status, GColorBlack);
-    text_layer_set_text_color(s_tl_status, GColorCyan);
-  }
-#else
-  // B&W: invert the status bar to signal day/night
-  text_layer_set_background_color(s_tl_status, daytime ? GColorBlack : GColorWhite);
-  text_layer_set_text_color(s_tl_status, daytime ? GColorWhite : GColorBlack);
-#endif
-
-  // Polar condition: show next event date instead of time
   if (today->is_polar_night) {
-    snprintf(s_buf_event_name, sizeof(s_buf_event_name), "Next Sunrise");
     char date_buf[16];
     s_format_date(today->next_sunrise_date, date_buf, sizeof(date_buf));
-    snprintf(s_buf_event_time, sizeof(s_buf_event_time), "%s", date_buf);
-    snprintf(s_buf_countdown, sizeof(s_buf_countdown), " ");
-    text_layer_set_text(s_tl_event_name, s_buf_event_name);
-    text_layer_set_text(s_tl_event_time, s_buf_event_time);
-    text_layer_set_text(s_tl_countdown, s_buf_countdown);
-    return;
-  }
-  if (today->is_polar_day) {
-    snprintf(s_buf_event_name, sizeof(s_buf_event_name), "Next Sunset");
+    snprintf(s_buf_event_time, sizeof(s_buf_event_time), "--");
+    snprintf(s_buf_event_name, sizeof(s_buf_event_name), "Next Sunrise %s", date_buf);
+    snprintf(s_buf_countdown, sizeof(s_buf_countdown), "No sunrise today");
+  } else if (today->is_polar_day) {
     char date_buf[16];
     s_format_date(today->next_sunset_date, date_buf, sizeof(date_buf));
-    snprintf(s_buf_event_time, sizeof(s_buf_event_time), "%s", date_buf);
-    snprintf(s_buf_countdown, sizeof(s_buf_countdown), " ");
-    text_layer_set_text(s_tl_event_name, s_buf_event_name);
-    text_layer_set_text(s_tl_event_time, s_buf_event_time);
-    text_layer_set_text(s_tl_countdown, s_buf_countdown);
-    return;
-  }
+    snprintf(s_buf_event_time, sizeof(s_buf_event_time), "--");
+    snprintf(s_buf_event_name, sizeof(s_buf_event_name), "Next Sunset %s", date_buf);
+    snprintf(s_buf_countdown, sizeof(s_buf_countdown), "No sunset today");
+  } else if (phase == SOLAR_PHASE_GOLDEN) {
+    bool morning = s_is_morning_golden(today, current_min);
+    const SolarEvent *transition = morning ?
+      &today->events[SOLAR_EVENT_SUNRISE] :
+      &today->events[SOLAR_EVENT_SUNSET];
+    const SolarEvent *end = morning ?
+      &today->golden_morning_end :
+      &today->events[SOLAR_EVENT_DUSK_GLOW];
+    const char *transition_label = morning ? "Sunrise" : "Sunset";
+    bool before_transition = s_event_ok(transition) &&
+                             current_min < transition->local_minutes;
 
-  // Normal case: find the next sunrise or sunset
-  NextEvent ne = s_find_next_event(today, tomorrow, current_min);
-
-  if (ne.found) {
-    snprintf(s_buf_event_name, sizeof(s_buf_event_name),
-             "%s", ne.is_sunrise ? "Sunrise" : "Sunset");
-
-    int32_t em = ne.local_minutes;
-    // Handle cross-midnight times
-    int h = (int)((em % 1440) / 60);
-    int m = (int)(em % 60);
-    if (h < 0) h += 24;
-    if (m < 0) m += 60;
-    snprintf(s_buf_event_time, sizeof(s_buf_event_time), "%02d:%02d", h, m);
-
-    // Countdown
-    int32_t effective_now = current_min;
-    int32_t effective_ev  = em;
-    if (ne.is_tomorrow) effective_ev += 1440;
-    int32_t delta = effective_ev - effective_now;
-    if (delta < 0) delta = 0;
-    int dh = (int)(delta / 60);
-    int dm = (int)(delta % 60);
-    if (dh > 0) {
-      snprintf(s_buf_countdown, sizeof(s_buf_countdown), "in %dh %dm", dh, dm);
+    if (before_transition) {
+      int32_t delta = s_minutes_until(current_min, transition->local_minutes, false);
+      s_format_duration_minutes(delta, s_buf_event_time, sizeof(s_buf_event_time));
+      snprintf(s_buf_event_name, sizeof(s_buf_event_name), "Next %s", transition_label);
+      s_format_event_line(transition_label,
+                          transition->local_minutes,
+                          false,
+                          s_buf_countdown,
+                          sizeof(s_buf_countdown));
+#ifdef PBL_COLOR
+      event_time_color = APOLLO_TIME_SUN;
+#endif
+    } else if (s_event_ok(end)) {
+      int32_t delta = s_minutes_until(current_min, end->local_minutes, false);
+      s_format_duration_minutes(delta, s_buf_event_time, sizeof(s_buf_event_time));
+      snprintf(s_buf_event_name, sizeof(s_buf_event_name), "Golden Hour Ends");
+      s_format_event_line("Ends",
+                          end->local_minutes,
+                          false,
+                          s_buf_countdown,
+                          sizeof(s_buf_countdown));
+#ifdef PBL_COLOR
+      event_time_color = APOLLO_TIME_GOLDEN;
+#endif
     } else {
-      snprintf(s_buf_countdown, sizeof(s_buf_countdown), "in %dm", dm);
+      snprintf(s_buf_event_time, sizeof(s_buf_event_time), "--");
+      snprintf(s_buf_event_name, sizeof(s_buf_event_name), "Golden Hour");
+      snprintf(s_buf_countdown, sizeof(s_buf_countdown), " ");
     }
   } else {
-    snprintf(s_buf_event_name, sizeof(s_buf_event_name), "---");
-    snprintf(s_buf_event_time, sizeof(s_buf_event_time), "--:--");
-    snprintf(s_buf_countdown, sizeof(s_buf_countdown), " ");
+    NextGoldenHour next_golden = s_find_next_golden_hour(today, tomorrow, current_min);
+    NextEvent next = s_find_next_event(today, tomorrow, current_min);
+
+    if (next_golden.found) {
+      int32_t delta = s_minutes_until(current_min,
+                                      next_golden.local_minutes,
+                                      next_golden.is_tomorrow);
+      s_format_duration_minutes(delta, s_buf_event_time, sizeof(s_buf_event_time));
+      snprintf(s_buf_event_name, sizeof(s_buf_event_name), "Next Golden Hour");
+#ifdef PBL_COLOR
+      event_time_color = APOLLO_TIME_GOLDEN;
+#endif
+    } else {
+      snprintf(s_buf_event_time, sizeof(s_buf_event_time), "--");
+      snprintf(s_buf_event_name, sizeof(s_buf_event_name), "No Golden Hour");
+    }
+
+    if (next.found) {
+      s_format_event_line(next.is_sunrise ? "Sunrise" : "Sunset",
+                          next.local_minutes,
+                          next.is_tomorrow,
+                          s_buf_countdown,
+                          sizeof(s_buf_countdown));
+    } else {
+      snprintf(s_buf_countdown, sizeof(s_buf_countdown), "No solar event");
+    }
   }
 
-  text_layer_set_text(s_tl_event_name, s_buf_event_name);
   text_layer_set_text(s_tl_event_time, s_buf_event_time);
+  text_layer_set_text(s_tl_event_name, s_buf_event_name);
   text_layer_set_text(s_tl_countdown, s_buf_countdown);
-}
 
-// -------------------------------------------------------------------------
-// Window lifecycle
-// -------------------------------------------------------------------------
-static void prv_window_load(Window *window) {
-  Layer *root  = window_get_root_layer(window);
-  GRect  bounds = layer_get_bounds(root);
-  int    w      = bounds.size.w;
-
-#ifdef PBL_ROUND
-  int inset = ROUND_INSET;
-  int loc_y    = ROUND_LOC_Y;
-  int loc_h    = ROUND_LOC_H;
-  int stat_y   = ROUND_STATUS_Y;
-  int stat_h   = ROUND_STATUS_H;
-  int name_y   = ROUND_NAME_Y;
-  int name_h   = ROUND_NAME_H;
-  int time_y   = ROUND_TIME_Y;
-  int time_h   = ROUND_TIME_H;
-  int cd_y     = ROUND_CD_Y;
-  int cd_h     = ROUND_CD_H;
+#ifdef PBL_COLOR
+  window_set_background_color(s_window, GColorBlack);
+  text_layer_set_text_color(s_tl_location, GColorWhite);
+  text_layer_set_text_color(s_tl_status, s_status_color_for_phase(phase));
+  text_layer_set_text_color(s_tl_event_name, GColorLightGray);
+  text_layer_set_text_color(s_tl_event_time, event_time_color);
+  text_layer_set_text_color(s_tl_countdown, GColorWhite);
 #else
-  int inset  = 0;
-  int loc_y    = RECT_LOC_Y;
-  int loc_h    = RECT_LOC_H;
-  int stat_y   = RECT_STATUS_Y;
-  int stat_h   = RECT_STATUS_H;
-  int name_y   = RECT_NAME_Y;
-  int name_h   = RECT_NAME_H;
-  int time_y   = RECT_TIME_Y;
-  int time_h   = RECT_TIME_H;
-  int cd_y     = RECT_CD_Y;
-  int cd_h     = RECT_CD_H;
+  window_set_background_color(s_window, GColorWhite);
+  text_layer_set_text_color(s_tl_location, GColorBlack);
+  text_layer_set_text_color(s_tl_status, GColorBlack);
+  text_layer_set_text_color(s_tl_event_name, GColorBlack);
+  text_layer_set_text_color(s_tl_event_time, GColorBlack);
+  text_layer_set_text_color(s_tl_countdown, GColorBlack);
 #endif
 
-  int eff_w = w - 2 * inset;
+  if (s_ring_layer) {
+    layer_mark_dirty(s_ring_layer);
+  }
+}
 
-  // Location name
+static void prv_window_load(Window *window) {
+  Layer *root = window_get_root_layer(window);
+  GRect bounds = layer_get_bounds(root);
+  int w = bounds.size.w;
+
+#ifdef PBL_ROUND
+  int inset = 22;
+  int loc_y = 34;
+  int loc_h = 18;
+  int status_y = 0;
+  int status_h = 0;
+  int next_y = 62;
+  int next_h = 18;
+  int time_y = 82;
+  int time_h = 34;
+  int countdown_y = 118;
+  int countdown_h = 18;
+#else
+  int inset = 14;
+  int loc_y = 24;
+  int loc_h = 18;
+  int status_y = 0;
+  int status_h = 0;
+  int next_y = 54;
+  int next_h = 18;
+  int time_y = 76;
+  int time_h = 34;
+  int countdown_y = 110;
+  int countdown_h = 18;
+#endif
+  int eff_w = w - inset * 2;
+
+#ifdef PBL_COLOR
+  window_set_background_color(window, GColorBlack);
+#else
+  window_set_background_color(window, GColorWhite);
+#endif
+
+  s_ring_layer = layer_create(bounds);
+  layer_set_update_proc(s_ring_layer, s_ring_update_proc);
+  layer_add_child(root, s_ring_layer);
+
   s_tl_location = text_layer_create(GRect(inset, loc_y, eff_w, loc_h));
-  text_layer_set_font(s_tl_location,
-    fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+  text_layer_set_font(s_tl_location, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
   text_layer_set_text_alignment(s_tl_location, GTextAlignmentCenter);
   text_layer_set_background_color(s_tl_location, GColorClear);
   layer_add_child(root, text_layer_get_layer(s_tl_location));
 
-  // Status label (Day / Night / Polar Day / Polar Night)
-  s_tl_status = text_layer_create(GRect(inset, stat_y, eff_w, stat_h));
-  text_layer_set_font(s_tl_status,
-    fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  s_tl_status = text_layer_create(GRect(inset, status_y, eff_w, status_h));
+  text_layer_set_font(s_tl_status, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   text_layer_set_text_alignment(s_tl_status, GTextAlignmentCenter);
+  text_layer_set_background_color(s_tl_status, GColorClear);
+  layer_set_hidden(text_layer_get_layer(s_tl_status), true);
   layer_add_child(root, text_layer_get_layer(s_tl_status));
 
-  // Event name (Sunrise / Sunset / etc.)
-  s_tl_event_name = text_layer_create(GRect(inset, name_y, eff_w, name_h));
-  text_layer_set_font(s_tl_event_name,
-    fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+  s_tl_event_time = text_layer_create(GRect(inset, time_y, eff_w, time_h));
+  text_layer_set_font(s_tl_event_time,
+                      fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+  text_layer_set_text_alignment(s_tl_event_time, GTextAlignmentCenter);
+  text_layer_set_background_color(s_tl_event_time, GColorClear);
+  layer_add_child(root, text_layer_get_layer(s_tl_event_time));
+
+  s_tl_event_name = text_layer_create(GRect(inset, next_y, eff_w, next_h));
+  text_layer_set_font(s_tl_event_name, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
   text_layer_set_text_alignment(s_tl_event_name, GTextAlignmentCenter);
   text_layer_set_background_color(s_tl_event_name, GColorClear);
   layer_add_child(root, text_layer_get_layer(s_tl_event_name));
 
-  // Event time (large)
-  s_tl_event_time = text_layer_create(GRect(inset, time_y, eff_w, time_h));
-  text_layer_set_font(s_tl_event_time,
-    fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
-  text_layer_set_text_alignment(s_tl_event_time, GTextAlignmentCenter);
-  text_layer_set_background_color(s_tl_event_time, GColorClear);
-#ifdef PBL_COLOR
-  text_layer_set_text_color(s_tl_event_time, GColorChromeYellow);
-#endif
-  layer_add_child(root, text_layer_get_layer(s_tl_event_time));
-
-  // Countdown
-  s_tl_countdown = text_layer_create(GRect(inset, cd_y, eff_w, cd_h));
-  text_layer_set_font(s_tl_countdown,
-    fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  s_tl_countdown = text_layer_create(GRect(inset, countdown_y, eff_w, countdown_h));
+  text_layer_set_font(s_tl_countdown, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   text_layer_set_text_alignment(s_tl_countdown, GTextAlignmentCenter);
   text_layer_set_background_color(s_tl_countdown, GColorClear);
   layer_add_child(root, text_layer_get_layer(s_tl_countdown));
 
-  // Placeholder text until first update
-  text_layer_set_text(s_tl_location,   "---");
-  text_layer_set_text(s_tl_status,     "---");
+  text_layer_set_text(s_tl_location, "---");
+  text_layer_set_text(s_tl_status, "---");
+  text_layer_set_text(s_tl_event_time, "--");
   text_layer_set_text(s_tl_event_name, "---");
-  text_layer_set_text(s_tl_event_time, "--:--");
-  text_layer_set_text(s_tl_countdown,  "");
+  text_layer_set_text(s_tl_countdown, "");
 }
 
 static void prv_window_unload(Window *window) {
+  layer_destroy(s_ring_layer);
+  s_ring_layer = NULL;
   text_layer_destroy(s_tl_location);
   text_layer_destroy(s_tl_status);
   text_layer_destroy(s_tl_event_name);
@@ -342,13 +837,10 @@ static void prv_window_unload(Window *window) {
   text_layer_destroy(s_tl_countdown);
 }
 
-// -------------------------------------------------------------------------
-// Public API
-// -------------------------------------------------------------------------
 Window *main_window_create(void) {
   s_window = window_create();
-  window_set_window_handlers(s_window, (WindowHandlers){
-    .load   = prv_window_load,
+  window_set_window_handlers(s_window, (WindowHandlers) {
+    .load = prv_window_load,
     .unload = prv_window_unload,
   });
   return s_window;
@@ -364,13 +856,14 @@ void main_window_destroy(void) {
 void main_window_update(const SolarDayResult *today,
                         const SolarDayResult *tomorrow,
                         const Location *loc) {
-  if (!s_window) return;
+  if (!s_window) {
+    return;
+  }
   s_do_update(today, tomorrow, loc);
 }
 
 void main_window_update_countdown(const SolarDayResult *today,
                                   const SolarDayResult *tomorrow,
                                   const Location *loc) {
-  // For now, do a full update; the buffers are already allocated.
   main_window_update(today, tomorrow, loc);
 }

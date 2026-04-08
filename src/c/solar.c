@@ -227,8 +227,10 @@ SolarDayResult solar_calc(int year, int month, int day,
   s_fill_event(&result.events[SOLAR_EVENT_SUNRISE],        sr.status,      sr.rise_min);
 
   if (gh_peak.status == SOLAR_STATUS_OK) {
+    s_fill_event(&result.golden_morning_end, SOLAR_STATUS_OK, gh_peak.rise_min);
     s_fill_event(&result.events[SOLAR_EVENT_GOLDEN_EVENING], SOLAR_STATUS_OK, gh_peak.set_min);
   } else {
+    result.golden_morning_end.status = gh_peak.status;
     result.events[SOLAR_EVENT_GOLDEN_EVENING].status = gh_peak.status;
   }
 

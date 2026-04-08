@@ -32,6 +32,8 @@ typedef struct {
 
 typedef struct {
   SolarEvent events[SOLAR_EVENT_COUNT];
+  // Morning golden hour ends when the rising sun reaches +6 degrees.
+  SolarEvent golden_morning_end;
   bool       is_polar_day;
   bool       is_polar_night;
   // For polar conditions: YYYYMMDD of the next day when sunrise/sunset exists.

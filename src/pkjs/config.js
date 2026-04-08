@@ -1,10 +1,7 @@
 var MAX_LOCATIONS = 8;
 
 var DEFAULT_LOCATIONS = [
-  { name: 'London',   lat:  51.5074,  lon:  -0.1278, baseOffset:    0, dst: false },
-  { name: 'New York', lat:  40.7128,  lon: -74.0060, baseOffset: -300, dst: false },
-  { name: 'Tokyo',    lat:  35.6762,  lon: 139.6503, baseOffset:  540, dst: false },
-  { name: 'Sydney',   lat: -33.8688,  lon: 151.2093, baseOffset:  600, dst: false }
+  { name: 'London', lat: 51.5074, lon: -0.1278, baseOffset: 0, dst: false }
 ];
 
 var DEFAULT_LOCATIONS_JSON = JSON.stringify(DEFAULT_LOCATIONS);
