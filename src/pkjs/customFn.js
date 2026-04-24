@@ -8,6 +8,9 @@ module.exports = function(minified) {
   var searchStatusItem;
   var searchResultsItem;
   var saveStatusItem;
+  var qualityEnabledItem;
+  var qualityApiKeyItem;
+  var qualityHelpItem;
   var searchButtonItem;
   var saveButtonItem;
   var rootFormEl;
@@ -34,6 +37,9 @@ module.exports = function(minified) {
       '.apollo-result strong{display:block;margin-bottom:4px}' +
       '.apollo-result span{display:block;font-size:13px;line-height:1.4;color:#555}' +
       '.apollo-result:active{background:#f4f4f4}' +
+      '.apollo-help{display:block;padding-top:4px;font-size:13px;line-height:1.5;color:#555}' +
+      '.apollo-help a{color:#ff4700;text-decoration:none}' +
+      '.apollo-help strong{color:#222}' +
       '.apollo-hidden .description{display:none}';
     document.head.appendChild(styleEl);
   }
@@ -156,6 +162,35 @@ module.exports = function(minified) {
 
   function clearMessages() {
     setStatus(saveStatusItem, 'info', '');
+  }
+
+  function renderQualityHelp() {
+    if (!qualityHelpItem) {
+      return;
+    }
+
+    qualityHelpItem.set(
+      '<span class="apollo-help">' +
+        '<strong>Use your own Sunsethue API key.</strong> ' +
+        '<strong>copy: https://sunsethue.com/dev-api</strong>' +
+      '</span>'
+    );
+  }
+
+  function updateQualityControls() {
+    var enabled = qualityEnabledItem && !!qualityEnabledItem.get();
+
+    if (!qualityApiKeyItem || !qualityHelpItem) {
+      return;
+    }
+
+    if (enabled) {
+      qualityApiKeyItem.show();
+      qualityHelpItem.show();
+    } else {
+      qualityApiKeyItem.hide();
+      qualityHelpItem.hide();
+    }
   }
 
   function normalizeLocation(loc) {
@@ -625,13 +660,24 @@ module.exports = function(minified) {
 
   function saveLocations() {
     var result = collectLocations();
+    var qualityEnabled;
+    var qualityApiKey;
     if (result.errors.length) {
       setStatus(saveStatusItem, 'error', result.errors[0]);
       return;
     }
 
+    qualityEnabled = !!qualityEnabledItem.get();
+    qualityApiKey = normalizeWhitespace(qualityApiKeyItem.get());
+    if (qualityEnabled && !qualityApiKey) {
+      setStatus(saveStatusItem, 'error', 'Enter your Sunsethue API key or turn the quality prediction off.');
+      return;
+    }
+
     var payload = {
-      LOCATIONS_JSON: JSON.stringify(result.locations)
+      LOCATIONS_JSON: JSON.stringify(result.locations),
+      QUALITY_ENABLED: qualityEnabled,
+      QUALITY_API_KEY: qualityApiKey
     };
 
     hiddenLocationsItem.set(payload.LOCATIONS_JSON);
@@ -671,6 +717,9 @@ module.exports = function(minified) {
     searchStatusItem = clay.getItemById('search-status');
     searchResultsItem = clay.getItemById('search-results');
     saveStatusItem = clay.getItemById('save-status');
+    qualityEnabledItem = clay.getItemByMessageKey('QUALITY_ENABLED');
+    qualityApiKeyItem = clay.getItemByMessageKey('QUALITY_API_KEY');
+    qualityHelpItem = clay.getItemById('quality-help');
 
     searchButtonItem = clay.getItemById('search-button');
     saveButtonItem = clay.getItemById('save-button');
@@ -678,6 +727,8 @@ module.exports = function(minified) {
     searchSectionEl = getSectionElement(editSlotItem);
 
     editSlotItem.hide();
+    renderQualityHelp();
+    updateQualityControls();
 
     for (var i = 0; i < MAX; i++) {
       slots.push(buildSlot(i));
@@ -741,6 +792,15 @@ module.exports = function(minified) {
         });
       })(slots[j]);
     }
+
+    qualityEnabledItem.on('change', function() {
+      updateQualityControls();
+      clearMessages();
+    });
+
+    qualityApiKeyItem.on('change', function() {
+      clearMessages();
+    });
 
     searchButtonItem.on('click', performSearch);
     saveButtonItem.on('click', saveLocations);

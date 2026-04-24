@@ -143,6 +143,38 @@ var config = [
     items: [
       {
         type: 'heading',
+        defaultValue: 'Sunsethue quality'
+      },
+      {
+        type: 'toggle',
+        messageKey: 'QUALITY_ENABLED',
+        label: 'Show quality prediction',
+        defaultValue: false
+      },
+      {
+        type: 'input',
+        messageKey: 'QUALITY_API_KEY',
+        label: 'Sunsethue API key',
+        defaultValue: '',
+        attributes: {
+          placeholder: 'Paste your x-api-key',
+          autocapitalize: 'off',
+          autocorrect: 'off',
+          spellcheck: 'false'
+        }
+      },
+      {
+        type: 'text',
+        id: 'quality-help',
+        defaultValue: ''
+      }
+    ]
+  },
+  {
+    type: 'section',
+    items: [
+      {
+        type: 'heading',
         defaultValue: 'Search and fill'
       },
       {

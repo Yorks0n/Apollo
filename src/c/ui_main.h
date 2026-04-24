@@ -10,9 +10,15 @@ void    main_window_destroy(void);
 // Refresh all content with new solar data and location.
 void main_window_update(const SolarDayResult *today,
                         const SolarDayResult *tomorrow,
-                        const Location *loc);
+                        const Location *loc,
+                        int loc_index);
 
 // Fast update: recompute the countdown only (called every minute).
 void main_window_update_countdown(const SolarDayResult *today,
                                   const SolarDayResult *tomorrow,
-                                  const Location *loc);
+                                  const Location *loc,
+                                  int loc_index);
+
+// Update or clear the cached quality payload displayed on the main view.
+void main_window_set_quality(const QualityCache *quality);
+void main_window_clear_quality(void);

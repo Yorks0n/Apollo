@@ -4,7 +4,6 @@
 #include <string.h>
 
 #define RING_PI 3.14159265f
-
 typedef enum {
   SOLAR_PHASE_NIGHT = 0,
   SOLAR_PHASE_TWILIGHT,
@@ -42,21 +41,32 @@ static TextLayer      *s_tl_status;
 static TextLayer      *s_tl_event_name;
 static TextLayer      *s_tl_event_time;
 static TextLayer      *s_tl_countdown;
+static TextLayer      *s_tl_quality;
 static SolarDayResult  s_cached_today;
 static SolarDayResult  s_cached_tomorrow;
 static Location        s_cached_loc;
+static QualityCache    s_cached_quality;
+static int             s_cached_loc_index;
 static bool            s_has_data;
+static bool            s_has_quality;
 
 static char s_buf_location[LOC_NAME_LEN + 4];
 static char s_buf_status[32];
 static char s_buf_event_name[32];
 static char s_buf_event_time[16];
 static char s_buf_countdown[24];
+static char s_buf_quality[QUALITY_TEXT_LEN + 8];
 static int  s_countdown_x;
 static int  s_countdown_y;
 static int  s_countdown_w;
 static int  s_countdown_h_single;
 static int  s_countdown_h_multi;
+static int  s_quality_x;
+static int  s_quality_y;
+static int  s_quality_w;
+static int  s_quality_h;
+static int  s_quality_gap;
+static int  s_quality_max_y;
 
 static int s_scale_from_width(int width, int numerator, int denominator) {
   return (width * numerator + denominator / 2) / denominator;
@@ -85,6 +95,15 @@ static int32_t s_local_minutes_now(int utc_offset_min) {
   time_t local = now + (time_t)utc_offset_min * 60;
   struct tm *t = gmtime(&local);
   return (int32_t)(t->tm_hour * 60 + t->tm_min);
+}
+
+static int32_t s_local_date_now(int utc_offset_min) {
+  time_t now = time(NULL);
+  int year = 0;
+  int month = 0;
+  int day = 0;
+  solar_local_date(now, utc_offset_min, &year, &month, &day);
+  return year * 10000 + month * 100 + day;
 }
 
 static void s_format_time_minutes(int32_t minutes, char *buf, size_t len) {
@@ -167,12 +186,37 @@ static void s_format_event_line(const char *label,
 
 static void s_set_countdown_text(const char *text) {
   bool multiline = strchr(text, '\n') != NULL;
+  int countdown_h = multiline ? s_countdown_h_multi : s_countdown_h_single;
+  int quality_y = s_countdown_y + countdown_h + s_quality_gap;
+  if (quality_y > s_quality_max_y) {
+    quality_y = s_quality_max_y;
+  }
   layer_set_frame(text_layer_get_layer(s_tl_countdown),
                   GRect(s_countdown_x,
                         s_countdown_y,
                         s_countdown_w,
-                        multiline ? s_countdown_h_multi : s_countdown_h_single));
+                        countdown_h));
   text_layer_set_text(s_tl_countdown, text);
+
+  if (s_tl_quality) {
+    layer_set_frame(text_layer_get_layer(s_tl_quality),
+                    GRect(s_quality_x,
+                          quality_y,
+                          s_quality_w,
+                          s_quality_h));
+  }
+}
+
+static void s_set_quality_text(const char *text) {
+  bool has_text = text && text[0] != '\0';
+  if (s_tl_quality) {
+    layer_set_hidden(text_layer_get_layer(s_tl_quality), !has_text);
+  }
+  if (has_text) {
+    text_layer_set_text(s_tl_quality, text);
+  } else if (s_tl_quality) {
+    text_layer_set_text(s_tl_quality, "");
+  }
 }
 
 static NextEvent s_find_next_event(const SolarDayResult *today,
@@ -340,6 +384,71 @@ static const char *s_phase_label(const SolarDayResult *today, int32_t current_mi
     return "Twilight";
   }
   return s_is_daytime(today, current_min) ? "Day" : "Night";
+}
+
+static const char *s_quality_text_for_target(int loc_index,
+                                             bool is_sunrise,
+                                             bool is_tomorrow,
+                                             int32_t today_date,
+                                             int32_t tomorrow_date) {
+  int32_t target_date = is_tomorrow ? tomorrow_date : today_date;
+  const char *text = NULL;
+
+  if (!s_has_quality || !s_cached_quality.synced ||
+      s_cached_quality.loc_index != (uint8_t)loc_index) {
+    return NULL;
+  }
+
+  if (target_date == s_cached_quality.date_0) {
+    text = is_sunrise ? s_cached_quality.sunrise_0 : s_cached_quality.sunset_0;
+  } else if (target_date == s_cached_quality.date_1) {
+    text = is_sunrise ? s_cached_quality.sunrise_1 : s_cached_quality.sunset_1;
+  }
+
+  return (text && text[0] != '\0') ? text : NULL;
+}
+
+static const char *s_current_quality_text(const SolarDayResult *today,
+                                          const SolarDayResult *tomorrow,
+                                          const Location *loc,
+                                          int loc_index,
+                                          int32_t current_min) {
+  int32_t today_date = s_local_date_now(loc->utc_offset_min);
+  int year = (int)(today_date / 10000);
+  int month = (int)((today_date % 10000) / 100);
+  int day = (int)(today_date % 100);
+  int32_t tomorrow_date;
+  SolarPhase phase;
+
+  solar_date_add_days(&year, &month, &day, 1);
+  tomorrow_date = year * 10000 + month * 100 + day;
+  phase = s_phase_for_minute(today, current_min);
+
+  if (today->is_polar_day || today->is_polar_night) {
+    return NULL;
+  }
+
+  if (phase == SOLAR_PHASE_GOLDEN) {
+    bool morning = s_is_morning_golden(today, current_min);
+    return s_quality_text_for_target(loc_index,
+                                     morning,
+                                     false,
+                                     today_date,
+                                     tomorrow_date);
+  }
+
+  {
+    NextEvent next = s_find_next_event(today, tomorrow, current_min);
+    if (!next.found) {
+      return NULL;
+    }
+
+    return s_quality_text_for_target(loc_index,
+                                     next.is_sunrise,
+                                     next.is_tomorrow,
+                                     today_date,
+                                     tomorrow_date);
+  }
 }
 
 #ifdef PBL_COLOR
@@ -705,9 +814,11 @@ static void s_ring_update_proc(Layer *layer, GContext *ctx) {
 
 static void s_do_update(const SolarDayResult *today,
                         const SolarDayResult *tomorrow,
-                        const Location *loc) {
+                        const Location *loc,
+                        int loc_index) {
   int32_t current_min;
   SolarPhase phase;
+  const char *quality_text;
 #ifdef PBL_COLOR
   GColor event_time_color = GColorWhite;
 #endif
@@ -715,6 +826,7 @@ static void s_do_update(const SolarDayResult *today,
   s_cached_today = *today;
   s_cached_tomorrow = *tomorrow;
   s_cached_loc = *loc;
+  s_cached_loc_index = loc_index;
   s_has_data = true;
 
   snprintf(s_buf_location, sizeof(s_buf_location), "%s", loc->name);
@@ -810,6 +922,13 @@ static void s_do_update(const SolarDayResult *today,
   text_layer_set_text(s_tl_event_time, s_buf_event_time);
   text_layer_set_text(s_tl_event_name, s_buf_event_name);
   s_set_countdown_text(s_buf_countdown);
+  quality_text = s_current_quality_text(today, tomorrow, loc, loc_index, current_min);
+  if (quality_text) {
+    snprintf(s_buf_quality, sizeof(s_buf_quality), "Quality %s", quality_text);
+  } else {
+    s_buf_quality[0] = '\0';
+  }
+  s_set_quality_text(s_buf_quality);
 
 #ifdef PBL_COLOR
   window_set_background_color(s_window, GColorBlack);
@@ -818,6 +937,7 @@ static void s_do_update(const SolarDayResult *today,
   text_layer_set_text_color(s_tl_event_name, GColorLightGray);
   text_layer_set_text_color(s_tl_event_time, event_time_color);
   text_layer_set_text_color(s_tl_countdown, GColorWhite);
+  text_layer_set_text_color(s_tl_quality, GColorLightGray);
 #else
   window_set_background_color(s_window, GColorWhite);
   text_layer_set_text_color(s_tl_location, GColorBlack);
@@ -825,6 +945,7 @@ static void s_do_update(const SolarDayResult *today,
   text_layer_set_text_color(s_tl_event_name, GColorBlack);
   text_layer_set_text_color(s_tl_event_time, GColorBlack);
   text_layer_set_text_color(s_tl_countdown, GColorBlack);
+  text_layer_set_text_color(s_tl_quality, GColorBlack);
 #endif
 
   if (s_ring_layer) {
@@ -854,6 +975,7 @@ static void prv_window_load(Window *window) {
   int time_h = 34;
   int countdown_y = 118;
   int countdown_h = 18;
+  int quality_h = 18;
   inset = s_scale_from_width(w, 12, 100);
   loc_y = s_scale_from_width(w, 19, 100);
   loc_h = s_scale_from_width(w, 10, 100);
@@ -863,6 +985,7 @@ static void prv_window_load(Window *window) {
   time_h = s_scale_from_width(w, 19, 100);
   countdown_y = s_scale_from_width(w, 66, 100);
   countdown_h = s_scale_from_width(w, 10, 100);
+  quality_h = countdown_h;
   location_font_key = large_round ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_14_BOLD;
   event_name_font_key = large_round ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_14_BOLD;
   event_time_font_key = large_round ? FONT_KEY_GOTHIC_28_BOLD : FONT_KEY_GOTHIC_24_BOLD;
@@ -880,6 +1003,7 @@ static void prv_window_load(Window *window) {
   int time_h = s_scale_from_width(w, 24, 100);
   int countdown_y = s_scale_from_width(w, 77, 100);
   int countdown_h = s_scale_from_width(w, 11, 100);
+  int quality_h = countdown_h;
 
   location_font_key = large_rect ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_14_BOLD;
   event_name_font_key = large_rect ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_14_BOLD;
@@ -932,6 +1056,12 @@ static void prv_window_load(Window *window) {
   s_countdown_w = eff_w;
   s_countdown_h_single = countdown_h;
   s_countdown_h_multi = countdown_h_multi;
+  s_quality_x = inset;
+  s_quality_y = countdown_y + countdown_h;
+  s_quality_w = eff_w;
+  s_quality_h = quality_h;
+  s_quality_gap = s_scale_from_width(w, 1, 100);
+  s_quality_max_y = bounds.size.h - s_quality_h - s_scale_from_width(w, 1, 100);
 
   s_tl_countdown = text_layer_create(GRect(inset, countdown_y, eff_w, countdown_h));
   text_layer_set_font(s_tl_countdown, fonts_get_system_font(countdown_font_key));
@@ -940,11 +1070,19 @@ static void prv_window_load(Window *window) {
   text_layer_set_background_color(s_tl_countdown, GColorClear);
   layer_add_child(root, text_layer_get_layer(s_tl_countdown));
 
+  s_tl_quality = text_layer_create(GRect(inset, s_quality_y, eff_w, quality_h));
+  text_layer_set_font(s_tl_quality, fonts_get_system_font(countdown_font_key));
+  text_layer_set_text_alignment(s_tl_quality, GTextAlignmentCenter);
+  text_layer_set_background_color(s_tl_quality, GColorClear);
+  layer_set_hidden(text_layer_get_layer(s_tl_quality), true);
+  layer_add_child(root, text_layer_get_layer(s_tl_quality));
+
   text_layer_set_text(s_tl_location, "---");
   text_layer_set_text(s_tl_status, "---");
   text_layer_set_text(s_tl_event_time, "--");
   text_layer_set_text(s_tl_event_name, "---");
   s_set_countdown_text("");
+  s_set_quality_text("");
 }
 
 static void prv_window_unload(Window *window) {
@@ -955,6 +1093,8 @@ static void prv_window_unload(Window *window) {
   text_layer_destroy(s_tl_event_name);
   text_layer_destroy(s_tl_event_time);
   text_layer_destroy(s_tl_countdown);
+  text_layer_destroy(s_tl_quality);
+  s_tl_quality = NULL;
 }
 
 Window *main_window_create(void) {
@@ -975,15 +1115,36 @@ void main_window_destroy(void) {
 
 void main_window_update(const SolarDayResult *today,
                         const SolarDayResult *tomorrow,
-                        const Location *loc) {
+                        const Location *loc,
+                        int loc_index) {
   if (!s_window) {
     return;
   }
-  s_do_update(today, tomorrow, loc);
+  s_do_update(today, tomorrow, loc, loc_index);
 }
 
 void main_window_update_countdown(const SolarDayResult *today,
                                   const SolarDayResult *tomorrow,
-                                  const Location *loc) {
-  main_window_update(today, tomorrow, loc);
+                                  const Location *loc,
+                                  int loc_index) {
+  main_window_update(today, tomorrow, loc, loc_index);
+}
+
+void main_window_set_quality(const QualityCache *quality) {
+  s_cached_quality = *quality;
+  s_has_quality = true;
+  if (s_has_data && s_window) {
+    s_do_update(&s_cached_today, &s_cached_tomorrow, &s_cached_loc, s_cached_loc_index);
+  }
+}
+
+void main_window_clear_quality(void) {
+  memset(&s_cached_quality, 0, sizeof(s_cached_quality));
+  s_has_quality = false;
+  if (s_window) {
+    s_set_quality_text("");
+    if (s_has_data) {
+      s_do_update(&s_cached_today, &s_cached_tomorrow, &s_cached_loc, s_cached_loc_index);
+    }
+  }
 }

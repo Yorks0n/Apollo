@@ -62,3 +62,23 @@ void storage_save(const LocationList *list) {
   persist_write_data(STORAGE_KEY_A, &a, sizeof(StorageBlockA));
   persist_write_data(STORAGE_KEY_B, &b, sizeof(StorageBlockB));
 }
+
+void storage_load_quality(QualityCache *out) {
+  memset(out, 0, sizeof(QualityCache));
+
+  if (!persist_exists(STORAGE_KEY_QUALITY)) {
+    return;
+  }
+
+  persist_read_data(STORAGE_KEY_QUALITY, out, sizeof(QualityCache));
+}
+
+void storage_save_quality(const QualityCache *quality) {
+  persist_write_data(STORAGE_KEY_QUALITY, quality, sizeof(QualityCache));
+}
+
+void storage_clear_quality(void) {
+  if (persist_exists(STORAGE_KEY_QUALITY)) {
+    persist_delete(STORAGE_KEY_QUALITY);
+  }
+}
